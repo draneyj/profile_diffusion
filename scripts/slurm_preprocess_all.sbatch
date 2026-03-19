@@ -5,25 +5,26 @@
 #SBATCH --time=24:00:00
 #SBATCH --account=azp
 
-# Resolve repo root from submit directory (preferred under Slurm).
-SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
-if [[ -d "${SUBMIT_DIR}/diffusion" ]]; then
-  REPO_DIR="$(cd "${SUBMIT_DIR}" && pwd)"
-elif [[ -d "${SUBMIT_DIR}/../diffusion" ]]; then
-  REPO_DIR="$(cd "${SUBMIT_DIR}/.." && pwd)"
-else
-  # Fallback to script location.
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-fi
+set -eo pipefail
+
+# Template usage:
+# 1) Copy this file to your repo top-level (optional):
+#      cp scripts/slurm_preprocess_all.sbatch preprocess.sbatch
+# 2) Edit variables below as needed.
+# 3) Submit from repo root:
+#      sbatch preprocess.sbatch
+#
+# Repo root resolution:
+# - If REPO_DIR is set externally, use it.
+# - Else default to SLURM_SUBMIT_DIR (or PWD), which works when you submit from repo root.
+REPO_DIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
+REPO_DIR="$(cd "${REPO_DIR}" && pwd)"
 
 module load anaconda3/2025.6
 
 # Robust conda activation in non-interactive shells.
-set +u
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate diffusion-pytorch
-set -u
 
 # Coarse-graining / dataset options
 SPECIES_TYPES="1,3"
@@ -46,6 +47,7 @@ export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 if [[ ! -d "${REPO_DIR}/diffusion" ]]; then
   echo "Could not locate python package directory: ${REPO_DIR}/diffusion" >&2
+  echo "Hint: submit from repo root or set REPO_DIR=/path/to/repo in the sbatch script." >&2
   exit 1
 fi
 

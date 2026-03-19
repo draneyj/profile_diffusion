@@ -1,23 +1,22 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion-preprocess
-#SBATCH --output=slurm-%x-%j.out
-#SBATCH --error=slurm-%x-%j.err
-#
-# CPU/memory
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#
-# Time limit
 #SBATCH --time=24:00:00
-#
-# Partition/GPU: not needed for preprocessing
-#SBATCH --partition=cpu
+#SBATCH --account=azp
 
 set -euo pipefail
 
+# Resolve repo root from this script location.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}" && pwd)"
+
 module load anaconda3/2025.6
 module load cudatoolkit/13.1
-conda activate diffusion-cuda124
+
+# Robust conda activation in non-interactive shells.
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate diffusion-pytorch
 
 # Coarse-graining / dataset options
 SPECIES_TYPES="1,3"
@@ -34,15 +33,9 @@ MAX_DUMP_FILES=""
 
 # ---- Load/activate Python environment ----
 echo "Running on host: $(hostname)"
-
-if command -v conda >/dev/null 2>&1; then
-  echo "Activating conda env: $ENV_NAME"
-  source "$(conda info --base)/etc/profile.d/conda.sh"
-  conda activate "$ENV_NAME"
-else
-  echo "conda not found in PATH. Activate your env manually before running this job."
-  exit 1
-fi
+echo "Repo dir: ${REPO_DIR}"
+cd "${REPO_DIR}"
+export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 # ---- Build dataset (combined inputs/targets) ----
 CMD=(python -m diffusion.data.make_data

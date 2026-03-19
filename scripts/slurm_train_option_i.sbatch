@@ -16,8 +16,11 @@
 
 set -euo pipefail
 
+# Resolve repo root from this script location.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 # ---- User config (edit as needed) ----
-REPO_DIR="/Users/jd6157/Desktop/diffusion"
 ENV_NAME="diffusion-cuda124"   # change to your conda env name
 
 DATASET_PATH="data/processed/dataset.pt"
@@ -38,12 +41,18 @@ cd "$REPO_DIR"
 
 if command -v conda >/dev/null 2>&1; then
   echo "Activating conda env: $ENV_NAME"
+  # Conda activation can reference unset internal vars on some clusters;
+  # temporarily disable nounset around activation.
+  set +u
   source "$(conda info --base)/etc/profile.d/conda.sh"
   conda activate "$ENV_NAME"
+  set -u
 else
   echo "conda not found in PATH. Activate your env manually before running this job."
   exit 1
 fi
+
+export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
 CMD=(python -m diffusion.train
   --option i

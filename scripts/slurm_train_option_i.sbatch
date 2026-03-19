@@ -14,18 +14,20 @@
 # Partition
 #SBATCH --partition=gpu
 
-set -euo pipefail
+set -eo pipefail
 
-# Resolve repo root from submit directory (preferred under Slurm).
-SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
-if [[ -d "${SUBMIT_DIR}/diffusion" ]]; then
-  REPO_DIR="$(cd "${SUBMIT_DIR}" && pwd)"
-elif [[ -d "${SUBMIT_DIR}/../diffusion" ]]; then
-  REPO_DIR="$(cd "${SUBMIT_DIR}/.." && pwd)"
-else
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-fi
+# Template usage:
+# 1) Copy this file to your repo top-level (optional):
+#      cp scripts/slurm_train_option_i.sbatch train_i.sbatch
+# 2) Edit variables below as needed.
+# 3) Submit from repo root:
+#      sbatch train_i.sbatch
+#
+# Repo root resolution:
+# - If REPO_DIR is set externally, use it.
+# - Else default to SLURM_SUBMIT_DIR (or PWD), which works when you submit from repo root.
+REPO_DIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
+REPO_DIR="$(cd "${REPO_DIR}" && pwd)"
 
 # ---- User config (edit as needed) ----
 ENV_NAME="diffusion-cuda124"   # change to your conda env name
@@ -49,12 +51,8 @@ cd "$REPO_DIR"
 
 if command -v conda >/dev/null 2>&1; then
   echo "Activating conda env: $ENV_NAME"
-  # Conda activation can reference unset internal vars on some clusters;
-  # temporarily disable nounset around activation.
-  set +u
   source "$(conda info --base)/etc/profile.d/conda.sh"
   conda activate "$ENV_NAME"
-  set -u
 else
   echo "conda not found in PATH. Activate your env manually before running this job."
   exit 1
@@ -63,6 +61,7 @@ fi
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 if [[ ! -d "${REPO_DIR}/diffusion" ]]; then
   echo "Could not locate python package directory: ${REPO_DIR}/diffusion" >&2
+  echo "Hint: submit from repo root or set REPO_DIR=/path/to/repo in the sbatch script." >&2
   exit 1
 fi
 

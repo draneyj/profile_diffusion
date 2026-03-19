@@ -16,16 +16,9 @@
 
 set -eo pipefail
 
-# Template usage:
-# 1) Copy this file to your repo top-level (optional):
-#      cp scripts/slurm_train_option_i.sbatch train_i.sbatch
-# 2) Edit variables below as needed.
-# 3) Submit from repo root:
-#      sbatch train_i.sbatch
-#
-# Repo root resolution:
-# - If REPO_DIR is set externally, use it.
-# - Else default to SLURM_SUBMIT_DIR (or PWD), which works when you submit from repo root.
+# Simple template:
+# - Copy to repo root and edit values below.
+# - Submit from repo root: sbatch train_i.sbatch
 REPO_DIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
 REPO_DIR="$(cd "${REPO_DIR}" && pwd)"
 
@@ -59,11 +52,6 @@ else
 fi
 
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
-if [[ ! -d "${REPO_DIR}/diffusion" ]]; then
-  echo "Could not locate python package directory: ${REPO_DIR}/diffusion" >&2
-  echo "Hint: submit from repo root or set REPO_DIR=/path/to/repo in the sbatch script." >&2
-  exit 1
-fi
 
 CMD=(python -m diffusion.train
   --option i

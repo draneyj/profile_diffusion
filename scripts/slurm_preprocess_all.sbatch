@@ -7,22 +7,14 @@
 
 set -eo pipefail
 
-# Template usage:
-# 1) Copy this file to your repo top-level (optional):
-#      cp scripts/slurm_preprocess_all.sbatch preprocess.sbatch
-# 2) Edit variables below as needed.
-# 3) Submit from repo root:
-#      sbatch preprocess.sbatch
-#
-# Repo root resolution:
-# - If REPO_DIR is set externally, use it.
-# - Else default to SLURM_SUBMIT_DIR (or PWD), which works when you submit from repo root.
-REPO_DIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
+# Simple template:
+# - Copy to repo root and edit values below.
+# - Submit from repo root: sbatch preprocess.sbatch
+REPO_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 REPO_DIR="$(cd "${REPO_DIR}" && pwd)"
 
 module load anaconda3/2025.6
 
-# Robust conda activation in non-interactive shells.
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate diffusion-pytorch
 
@@ -44,12 +36,6 @@ echo "Running on host: $(hostname)"
 echo "Repo dir: ${REPO_DIR}"
 cd "${REPO_DIR}"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
-
-if [[ ! -d "${REPO_DIR}/diffusion" ]]; then
-  echo "Could not locate python package directory: ${REPO_DIR}/diffusion" >&2
-  echo "Hint: submit from repo root or set REPO_DIR=/path/to/repo in the sbatch script." >&2
-  exit 1
-fi
 
 # ---- Build dataset (combined inputs/targets) ----
 CMD=(python -m diffusion.data.make_data

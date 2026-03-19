@@ -16,9 +16,16 @@
 
 set -euo pipefail
 
-# Resolve repo root from this script location.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Resolve repo root from submit directory (preferred under Slurm).
+SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
+if [[ -d "${SUBMIT_DIR}/diffusion" ]]; then
+  REPO_DIR="$(cd "${SUBMIT_DIR}" && pwd)"
+elif [[ -d "${SUBMIT_DIR}/../diffusion" ]]; then
+  REPO_DIR="$(cd "${SUBMIT_DIR}/.." && pwd)"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
 
 # ---- User config (edit as needed) ----
 ENV_NAME="diffusion-cuda124"   # change to your conda env name
@@ -37,6 +44,7 @@ VAL_FRACTION=0.1
 SAVE_EVERY_N_EPOCHS=5
 
 echo "Running on host: $(hostname)"
+echo "Repo dir: ${REPO_DIR}"
 cd "$REPO_DIR"
 
 if command -v conda >/dev/null 2>&1; then
@@ -53,6 +61,10 @@ else
 fi
 
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
+if [[ ! -d "${REPO_DIR}/diffusion" ]]; then
+  echo "Could not locate python package directory: ${REPO_DIR}/diffusion" >&2
+  exit 1
+fi
 
 CMD=(python -m diffusion.train
   --option i

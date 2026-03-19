@@ -5,18 +5,25 @@
 #SBATCH --time=24:00:00
 #SBATCH --account=azp
 
-set -euo pipefail
-
-# Resolve repo root from this script location.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}" && pwd)"
+# Resolve repo root from submit directory (preferred under Slurm).
+SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
+if [[ -d "${SUBMIT_DIR}/diffusion" ]]; then
+  REPO_DIR="$(cd "${SUBMIT_DIR}" && pwd)"
+elif [[ -d "${SUBMIT_DIR}/../diffusion" ]]; then
+  REPO_DIR="$(cd "${SUBMIT_DIR}/.." && pwd)"
+else
+  # Fallback to script location.
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
 
 module load anaconda3/2025.6
-module load cudatoolkit/13.1
 
 # Robust conda activation in non-interactive shells.
+set +u
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate diffusion-pytorch
+set -u
 
 # Coarse-graining / dataset options
 SPECIES_TYPES="1,3"
@@ -36,6 +43,11 @@ echo "Running on host: $(hostname)"
 echo "Repo dir: ${REPO_DIR}"
 cd "${REPO_DIR}"
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
+
+if [[ ! -d "${REPO_DIR}/diffusion" ]]; then
+  echo "Could not locate python package directory: ${REPO_DIR}/diffusion" >&2
+  exit 1
+fi
 
 # ---- Build dataset (combined inputs/targets) ----
 CMD=(python -m diffusion.data.make_data

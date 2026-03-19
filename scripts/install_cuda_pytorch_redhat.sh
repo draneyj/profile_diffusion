@@ -1,89 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install CUDA-enabled PyTorch on a RedHat/Linux HPC cluster.
+# Simple Princeton-style GPU PyTorch install script.
 #
-# Assumptions:
-# - You have `conda` available (Miniconda/Anaconda) and can create environments.
-# - Your machine has NVIDIA driver compatibility for the selected CUDA wheel.
+# This follows:
+# https://researchcomputing.princeton.edu/support/knowledge-base/pytorch
 #
-# Usage:
-#   bash scripts/install_cuda_pytorch_redhat.sh --env diffusion-cuda124 --python 3.12 --torch_tag cu124
-#
-# Where `--torch_tag` must be one of: cu118, cu121, cu124
+# It does:
+# 1) module load anaconda3/2025.6
+# 2) conda create --name torch-env python=3.12
+# 3) pip install torch torchvision from cu130 index
+# 4) installs common extras used in this repo
+# 5) verifies GPU visibility
 
-ENV_NAME="diffusion-cuda124"
+ENV_NAME="diffusion-pytorch"
 PYTHON_VERSION="3.12"
-TORCH_TAG="cu124"
-CUDA_MODULE_DEFAULT="cudatoolkit/13.1"
-ANACONDA_MODULE_DEFAULT="anaconda3/2025.6"
-CUDA_MODULE="$CUDA_MODULE_DEFAULT"
-ANACONDA_MODULE="$ANACONDA_MODULE_DEFAULT"
+ANACONDA_MODULE="anaconda3/2025.6"
+PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --env) ENV_NAME="${2:-}"; shift 2 ;;
-    --python) PYTHON_VERSION="${2:-}"; shift 2 ;;
-    --torch_tag) TORCH_TAG="${2:-}"; shift 2 ;;
-    --cuda_module) CUDA_MODULE="${2:-}"; shift 2 ;;
-    --anaconda_module) ANACONDA_MODULE="${2:-}"; shift 2 ;;
-    -h|--help)
-      echo "Usage: $0 [--env ENV_NAME] [--python PY_VERSION] [--torch_tag cu118|cu121|cu124] [--cuda_module cudatoolkit/<ver>] [--anaconda_module anaconda3/<ver>]"
-      exit 0
-      ;;
-    *)
-      echo "Unknown arg: $1"
-      exit 2
-      ;;
-  esac
-done
+echo "Loading module: ${ANACONDA_MODULE}"
+module load "${ANACONDA_MODULE}"
 
-if command -v module >/dev/null 2>&1; then
-  echo "Loading modules:"
-  echo "  module load ${ANACONDA_MODULE}"
-  echo "  module load ${CUDA_MODULE}"
-  module load "${ANACONDA_MODULE}" || true
-  module load "${CUDA_MODULE}" || true
-fi
-
-if [[ ! -x "$(command -v conda)" ]]; then
-  echo "Error: conda not found in PATH after attempting module loads." >&2
-  echo "Ensure you can run: module load ${ANACONDA_MODULE}" >&2
-  echo "Then activate: conda activate <env> (or re-run this script)." >&2
+if ! command -v conda >/dev/null 2>&1; then
+  echo "conda not found after module load. Exiting."
   exit 1
 fi
 
-if [[ -f /etc/redhat-release ]]; then
-  echo "Detected RedHat-like system: $(cat /etc/redhat-release)"
-fi
-
-case "$TORCH_TAG" in
-  cu118|cu121|cu124) ;;
-  *)
-    echo "Unsupported --torch_tag: $TORCH_TAG (expected cu118, cu121, or cu124)" >&2
-    exit 2
-    ;;
-esac
+source "$(conda info --base)/etc/profile.d/conda.sh"
 
 echo "Creating conda env: ${ENV_NAME} (python=${PYTHON_VERSION})"
-conda create -y -n "${ENV_NAME}" "python=${PYTHON_VERSION}" pip numpy tqdm matplotlib
+conda create --name "${ENV_NAME}" "python=${PYTHON_VERSION}" -y
 
-echo "Upgrading pip"
-conda run -n "${ENV_NAME}" python -m pip install --upgrade pip
+echo "Activating ${ENV_NAME}"
+conda activate "${ENV_NAME}"
 
-# Install CUDA-enabled PyTorch from PyTorch's wheel index for the tag.
-# For example:
-#   cu124 -> https://download.pytorch.org/whl/cu124/...
-WHEEL_INDEX_URL="https://download.pytorch.org/whl/${TORCH_TAG}"
-echo "Installing torch from index: ${WHEEL_INDEX_URL}"
-conda run -n "${ENV_NAME}" python -m pip install --no-cache-dir torch --index-url "${WHEEL_INDEX_URL}"
+echo "Installing PyTorch (GPU) + torchvision"
+pip3 install torch torchvision --index-url "${PYTORCH_INDEX_URL}"
 
+echo "Installing extra packages used by this project"
+pip3 install numpy tqdm matplotlib ipykernel
+
+echo "Testing PyTorch GPU visibility"
+python -c "import torch; print('torch', torch.__version__); print('cuda available', torch.cuda.is_available())"
+
+echo
 echo "Done."
-echo "Installing extra plotting deps (matplotlib)"
-conda run -n "${ENV_NAME}" python -m pip install --upgrade matplotlib || true
-
-echo "Activate:"
+echo "Use this env with:"
+echo "  module load ${ANACONDA_MODULE}"
 echo "  conda activate ${ENV_NAME}"
-echo "Quick check:"
-echo "  python -c \"import torch; print('torch', torch.__version__); print('cuda available', torch.cuda.is_available())\""
 

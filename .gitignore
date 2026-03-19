@@ -35,6 +35,10 @@ rollout_*.npz
 
 # Logs
 *.log
+slurm-*.out
+slurm-*.err
+*.out
+*.err
 
 # OS
 .DS_Store

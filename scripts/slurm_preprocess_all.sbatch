@@ -52,6 +52,7 @@ CMD=(python -m diffusion.data.make_data
   --species_types "$SPECIES_TYPES"
   --masses "$MASSES"
   --a "$A"
+  --num_workers "${SLURM_CPUS_PER_TASK:-1}"
 )
 
 if [[ "$PAD_TO_COMMON_NZ" -eq 1 ]]; then

@@ -26,7 +26,7 @@ if ! command -v conda >/dev/null 2>&1; then
   exit 1
 fi
 
-source "$(conda info --base)/etc/profile.d/conda.sh"
+# source "$(conda info --base)/etc/profile.d/conda.sh"
 
 echo "Creating conda env: ${ENV_NAME} (python=${PYTHON_VERSION})"
 conda create --name "${ENV_NAME}" "python=${PYTHON_VERSION}" -y

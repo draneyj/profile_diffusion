@@ -1,0 +1,56 @@
+The two options should be implemented as separate black box modules that allow for both training and inference code to run.
+
+Training should use a single module which can use either model interchangably.
+
+Inference should be accomplished with a separate code which can use either model, and mainly handles setting up initial conditions and outputting the results.
+
+The implementation should be in either JAX or PyTorch
+
+There should be a make_data.py file which turns lammps dumps like those in the data/dumps directory into trainable datapoints.
+
+The order parameter in each cell should be of the following form where a is the lattice constant
+\xi = \frac{1}{3}(\lambda_x + \lambda_y + \lambda_z)
+\lambda_x = \frac{1}{N} \sum_{i=1}^{N} \cos\left(\frac{8\pi x_i}{a}\right)
+
+The data has the lattice constant a=3.5657157
+
+Decisions made (implementation-specific)
+1. Framework: PyTorch implementation (both options).
+2. Order parameter: computed per coarse cell using the absolute `x,y,z` coordinates from the LAMMPS dump via
+   xi = (1/3)(lambda_x + lambda_y + lambda_z), lambda_x = mean_i cos(8*pi*x_i/a) (and similarly for y and z).
+   - Updated: the cosine sums/means are computed using only LAMMPS atom `type=1` by default (`--order_lammps_type`, default `1`).
+3. Species masses: passed in as configuration/CLI parameters (the code does not hardcode carbon/argon masses).
+4. Boundary conditions: periodic in `x` and `y` when mapping atoms to coarse cells.
+   Non-periodic in `z`: atoms mapping outside the chosen z-range are ignored during datapoint creation.
+5. Coarse grid: the entire LAMMPS box is split into a-sized cubic cells using grid dims computed with `floor(box_extent/a)`.
+6. Training datapoint pairing: `make_data.py` creates (input, target) pairs as frame t -> frame t + stride_k (configurable `--stride_k`),
+   using numeric dump filenames (`data/dumps/<number>.dump`) for ordering.
+7. Option I: implemented as a diffusion-style iterative refinement CNN that uses a full 3x3x3 neighborhood (via 3D conv with circular padding in x/y and zero padding in z).
+8. Option II: implemented with a face-flux predictor and constrained transfer engine.
+   - Hard integer transfers are used in `eval()`; soft differentiable transfers are used during training when enabled.
+   - Outgoing fluxes are scaled per source cell to avoid negative atom counts or negative kinetic energy.
+   - Because the order parameter is not directly determined from fluxes alone (no explicit atom positions are tracked),
+     Option II includes an additional learned head to predict next-step order.
+9. Option II inference scalability: for large grids, `diffusion/infer.py` forces soft transfer in `eval()` and rounds/clamps outputs at
+   the end (instead of the exact hard greedy integer transfer).
+
+10. LAMMPS parsing + frame handling: `diffusion/data/make_data.py` now parses many `ITEM: TIMESTEP` blocks inside a single `data/dumps/*.dump`
+    file and produces coarse-grained tensors per internal timestep.
+    - Training pairs are formed only within each dump file’s internal frame order (no cross-dump time mixing).
+11. Smoke-test dataset limiting: `diffusion/data/make_data.py` adds `--max_dump_files` to cap the number of `*.dump` files used
+    when building a small combined `dataset.pt`.
+12. Padding when `nz` differs across dumps: `diffusion/data/make_data.py` adds
+    - `--pad_to_common_nz` (pads empty z-cells at the top to a common `nz`, defaulting to the max across included dumps)
+    - `--pad_nz_mode {max,first,fixed}` and optional `--common_nz`
+    - `--mask_loss_padded_cells` which saves a `loss_mask` tensor into the dataset payload.
+13. Masked training loss: `diffusion/train.py` now checks for an optional `loss_mask` in the dataset payload and uses masked MSE
+    for `(counts, momentum, ke, order)` when present (so padded z-cells don’t contribute to loss).
+14. Preprocessing scripts aligned with multi-frame dumps:
+    - `scripts/preprocess_dumps.py` now writes one preprocessed tensor file per timestep *inside* each dump, using filenames like
+      `<dump_stem>_frame<frame_index>.pt`, and records `dump_stem` + `frame_index` in `manifest.json`.
+    - `scripts/build_dataset_from_preprocessed.py` now forms training pairs within each dump boundary using `frame_index`
+      (matching `diffusion/data/make_data.py` behavior).
+15. Option I tensor-shape handling: `diffusion/models/option_i.py` uses three `Conv3d(kernel=3,padding=0)` blocks, so it pads
+    by 3 voxels in x/y (circular) and 3 voxels in z (zero) before applying the network to keep the output grid shape
+    identical to the input grid (avoids channel/spatial mismatches during refinement).
+

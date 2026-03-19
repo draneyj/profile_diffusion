@@ -1,0 +1,14 @@
+name: diffusion-torch
+channels:
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  - tqdm
+  - matplotlib
+  - pip:
+      # Use pip so the correct macOS (Metal/MPS-capable) torch wheel is selected.
+      - torch
+

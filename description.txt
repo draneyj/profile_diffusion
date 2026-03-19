@@ -1,0 +1,70 @@
+Building a ML model capabale of running large-scale coarse grained simulations from MD data.
+
+Model works in the following manner:
+
+The simulation is split into large cubic cells 1 unit cell in size (1/6 of training data simulation width)
+Models take in the current state and predict the next state at each cell. This means the neural networks will be
+applied kN times where N is the number of cells in the simulation, allowing a variable simulation size.
+
+
+There are currently two ideas for how the model operates.
+
+=================================================================================================================
+
+OPTION I:
+For each cell, the cell takes in the current and surrounding cell data:
+    * Number of each atom type
+    * total momentum
+    * total KE (kinetic energy)
+    * order parameter
+as well as a noisy version of the next timestep's cell data, then a series of models REFINE
+the noisy data into the actual next cell state (rounding for the number of atoms). This is a CNN diffusion model.
+Benefits: 
+    * Can change the size of CNN network to allow for larger timesteps, more info, etc.
+    * Diffusion nature accounts for the randomness of the simulation
+Drawbacks:
+    * Must learn conservation laws via magic... conservation not guaranteed.
+
+=================================================================================================================
+
+OPTION II:
+For each cells face, the simulation takes in
+    * Number of each atom type
+    * total momentum (rotated relative to face)
+    * total KE (kinetic energy)
+of the two cells that share that face. Then it predicts
+    * a FORCE momentum flux: This momentum is transferred without moving atoms
+    * a FORCE KE flux: this KE is transferred without moving atoms
+    * a MATERIAL momentum flux: the momentum transferred with atoms
+    * a MATERIAL KE flux: the KE transferred with atoms
+    * the atom flux for each species. If zero, the above material fluxes are ignored (set to 0).
+        - this will be predicted as a float but enacted in whole numbers.
+The simulation then transferrs as much of each of these four fluxes as it can OUT of the respective cells.
+This starts with the material fluxes, then the force fluxes. If at any point the fluxes would create negative KE
+or number of atoms, then all fluxes out of the cell are reduced equally until fluxes are valid.
+
+For atomic fluxes: atoms will be removed from cells one at a time, starting with the highest flux number. Example:
+fluxes out of the cell are 2.7 to cell a and 1.3 to cell b. There are three atoms in the cell. First an atom goes to
+cell a. The remaining fluxes are then 1.7 and 1.3. Then another atom goes to cell a. Then the fluxes are 0.7 and 1.3.
+The last atom goes to cell b, so fluxes are 0.7 and 0.3. These remaining fluxes are ignored since we are out of atoms
+to transfer. If there was another atom it would go to cell a. 
+
+Next we transfer everything that was transferred out of the cells into the other cells. Thus there are three phases
+
+Transfer MATERIAL fluxes OUT of cells they are leaving
+Transfer FORCE fluxes OUT of cells they are leaving
+Transfer ALL fluxes IN cells they're headed to
+
+Benefits:
+    * conservation laws obeyed
+    * fewer cells being taken in as data means smaller networks
+    * doesn't require multiple networks like a diffusion model
+Drawbacks:
+    * Not random despite the data being random
+    * There are 3x as many fluxes as there are cells, so the model must run 3N times rather than N as in the CNN
+    * Overall this implementation is more complex.
+    * Loss function is a penalty of the *result* of the predicted fluxes, which have many conditionals and rounding issues, which
+        makes things harder for the NN to learn. We don't know the fluxes based on the data, only what changes they produce.
+        This means ALL fluxes must be predicted and computed. Gradient tracking will be a massive undertaking and training
+        may be slow or even impossible.
+        

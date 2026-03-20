@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion-preprocess
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=24:00:00
 #SBATCH --account=azp

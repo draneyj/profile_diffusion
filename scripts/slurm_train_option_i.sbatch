@@ -5,7 +5,7 @@
 #
 # GPU
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=1
 #SBATCH --mem=48G
 #
 # Time limit

@@ -66,3 +66,7 @@ echo
 
 echo "Preprocessing complete: data/processed/dataset.pt"
 
+echo "If your dumps had mixed (nx,ny) shapes, make_data will also generate:"
+echo "  - data/processed/dataset_nx*__ny*.pt"
+echo "  - data/processed/dataset_by_xy_manifest.json"
+

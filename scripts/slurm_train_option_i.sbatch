@@ -25,7 +25,8 @@ REPO_DIR="$(cd "${REPO_DIR}" && pwd)"
 # ---- User config (edit as needed) ----
 ENV_NAME="diffusion-cuda124"   # change to your conda env name
 
-DATASET_PATH="data/processed/dataset.pt"
+DATASET_PATH_BASE="data/processed/dataset.pt"
+DATASET_PATH_MANIFEST="${DATASET_PATH_BASE%.pt}_by_xy_manifest.json"
 
 # Training hyperparameters (adjust as needed)
 EPOCHS=5
@@ -53,9 +54,27 @@ fi
 
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
+# If make_data split by (nx,ny), use the manifest-generated dataset files.
+if [[ -f "$DATASET_PATH_MANIFEST" ]]; then
+  DATASET_PATHS="$(
+    python - <<PY
+import json
+from pathlib import Path
+obj = json.loads(Path("$DATASET_PATH_MANIFEST").read_text(encoding="utf-8"))
+print(",".join(d["dataset_path"] for d in obj["generated_datasets"]))
+PY
+  )"
+else
+  DATASET_PATHS="$DATASET_PATH_BASE"
+fi
+
+echo "Training on dataset paths:"
+echo "$DATASET_PATHS"
+
 CMD=(python -m diffusion.train
   --option i
-  --dataset_path "$DATASET_PATH"
+  --dataset_paths "$DATASET_PATHS"
+  --shape_balance_mode proportional
   --epochs "$EPOCHS"
   --batch_size "$BATCH_SIZE"
   --learning_rate "$LR"

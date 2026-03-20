@@ -85,7 +85,18 @@ def main() -> None:
         action="store_true",
         help="If set, plot x=z and y=t. Default plots x=t and y=z.",
     )
-    parser.add_argument("--origin_lower", action="store_true", help="matplotlib origin='lower'.")
+    parser.add_argument(
+        "--origin_lower",
+        action="store_true",
+        help="(Deprecated) matplotlib origin='lower'. Kept for backwards compatibility.",
+    )
+    # Default behavior: origin="lower" to match the physical dump z-direction.
+    # Use --origin_upper to flip vertically.
+    parser.add_argument(
+        "--origin_upper",
+        action="store_true",
+        help="matplotlib origin='upper' (flip vertically).",
+    )
 
     args = parser.parse_args()
 
@@ -147,7 +158,7 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     plt.figure(figsize=(7, 4))
-    origin = "lower" if args.origin_lower else "upper"
+    origin = "upper" if args.origin_upper else "lower"
 
     # Choose axis orientation (default: x=t, y=z).
     if not args.z_on_x:

@@ -25,8 +25,8 @@ DATASET_PATH_BASE="data/processed/dataset.pt"
 DATASET_PATH_MANIFEST="${DATASET_PATH_BASE%.pt}_by_xy_manifest.json"
 
 # Training hyperparameters (adjust as needed)
-EPOCHS=50
-BATCH_SIZE=10
+EPOCHS=100
+BATCH_SIZE=500
 LR=1e-3
 HIDDEN_CHANNELS=64
 NUM_REFINE_STEPS=4

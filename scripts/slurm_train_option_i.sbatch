@@ -2,19 +2,17 @@
 #SBATCH --job-name=diffusion-train-i
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
-#
-# GPU
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=48G
-#
-# Time limit
-#SBATCH --time=12:00:00
-#
-# Partition
-#SBATCH --partition=gpu
+#SBATCH --mem=32G
+#SBATCH --time=24:00:00
+#SBATCH --account=azp
+#SBATCH --mail-type=all
 
 set -eo pipefail
+
+module load anaconda3/2025.6
+conda activate diffusion-pytorch
 
 # Simple template:
 # - Copy to repo root and edit values below.
@@ -23,18 +21,16 @@ REPO_DIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
 REPO_DIR="$(cd "${REPO_DIR}" && pwd)"
 
 # ---- User config (edit as needed) ----
-ENV_NAME="diffusion-cuda124"   # change to your conda env name
-
 DATASET_PATH_BASE="data/processed/dataset.pt"
 DATASET_PATH_MANIFEST="${DATASET_PATH_BASE%.pt}_by_xy_manifest.json"
 
 # Training hyperparameters (adjust as needed)
-EPOCHS=5
-BATCH_SIZE=2
+EPOCHS=50
+BATCH_SIZE=10
 LR=1e-3
 HIDDEN_CHANNELS=64
-NUM_REFINE_STEPS=1
-NOISE_STD=0.1
+NUM_REFINE_STEPS=4
+NOISE_STD=0.25
 
 VAL_FRACTION=0.1
 SAVE_EVERY_N_EPOCHS=5
@@ -43,14 +39,6 @@ echo "Running on host: $(hostname)"
 echo "Repo dir: ${REPO_DIR}"
 cd "$REPO_DIR"
 
-if command -v conda >/dev/null 2>&1; then
-  echo "Activating conda env: $ENV_NAME"
-  source "$(conda info --base)/etc/profile.d/conda.sh"
-  conda activate "$ENV_NAME"
-else
-  echo "conda not found in PATH. Activate your env manually before running this job."
-  exit 1
-fi
 
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
@@ -71,7 +59,9 @@ fi
 echo "Training on dataset paths:"
 echo "$DATASET_PATHS"
 
-CMD=(python -m diffusion.train
+export PYTHONUNBUFFERED=1
+
+CMD=(python -u -m diffusion.train
   --option i
   --dataset_paths "$DATASET_PATHS"
   --shape_balance_mode proportional
@@ -83,6 +73,7 @@ CMD=(python -m diffusion.train
   --noise_std "$NOISE_STD"
   --val_fraction "$VAL_FRACTION"
   --save_every_n_epochs "$SAVE_EVERY_N_EPOCHS"
+  --learning_curve_path data/processed/learning_curve_optioni.csv
   --device cuda
 )
 

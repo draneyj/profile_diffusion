@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import math
 from dataclasses import dataclass
@@ -81,6 +82,12 @@ def main() -> None:
         help="Save checkpoints only every N epochs (final epoch is always saved).",
     )
     parser.add_argument("--split_seed", type=int, default=None, help="Seed for train/val split (defaults to --seed).")
+    parser.add_argument(
+        "--learning_curve_path",
+        type=str,
+        default=None,
+        help="Optional CSV path for per-epoch learning curve. Defaults to <output_dir>/learning_curve_option<opt>.csv.",
+    )
 
     # Model hyperparameters.
     parser.add_argument("--hidden_channels", type=int, default=64)
@@ -209,6 +216,15 @@ def main() -> None:
 
     out_dir = args.output_dir
     os.makedirs(out_dir, exist_ok=True)
+    learning_curve_path = (
+        args.learning_curve_path
+        if args.learning_curve_path is not None
+        else os.path.join(out_dir, f"learning_curve_option{args.option}.csv")
+    )
+    os.makedirs(os.path.dirname(learning_curve_path) or ".", exist_ok=True)
+    with open(learning_curve_path, "w", newline="", encoding="utf-8") as f_curve:
+        writer = csv.writer(f_curve)
+        writer.writerow(["epoch", "train_loss", "val_loss"])
 
     # Training interleave weights across datasets (shape balance).
     train_sizes = torch.tensor([d["num_train_samples"] for d in per_dataset], dtype=torch.float64)
@@ -338,9 +354,12 @@ def main() -> None:
             )
 
         if avg_val is None:
-            print(f"[epoch {epoch}] train_loss={avg_train:.6f}")
+            print(f"[epoch {epoch}] train_loss={avg_train:.6f}", flush=True)
         else:
-            print(f"[epoch {epoch}] train_loss={avg_train:.6f} val_loss={avg_val:.6f}")
+            print(f"[epoch {epoch}] train_loss={avg_train:.6f} val_loss={avg_val:.6f}", flush=True)
+        with open(learning_curve_path, "a", newline="", encoding="utf-8") as f_curve:
+            writer = csv.writer(f_curve)
+            writer.writerow([epoch, f"{avg_train:.10f}", "" if avg_val is None else f"{avg_val:.10f}"])
 
 
 if __name__ == "__main__":

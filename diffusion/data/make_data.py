@@ -431,17 +431,9 @@ def build_dataset(
     if not dump_paths:
         raise ValueError(f"No .dump files found in {dumps_dir}")
 
-    # Determine nx/ny from the first dump.
-    _, first_state, _ = make_coarse_state_from_dump(
-        str(dump_paths[0]),
-        species=species,
-        grid=grid,
-        order_lammps_type=order_lammps_type,
-    )
-    nx, ny = first_state.grid_shape[0], first_state.grid_shape[1]
-
-    # Determine nz per dump for padding decisions.
-    dump_nzs: List[int] = []
+    # Group dumps by their locked (nx, ny), so we can train per-shape without
+    # padding x/y (which would break periodicity and batching).
+    dump_info: List[Tuple[int, int, int, Path]] = []
     for dp in dump_paths:
         _, st, _ = make_coarse_state_from_dump(
             str(dp),
@@ -449,100 +441,177 @@ def build_dataset(
             grid=grid,
             order_lammps_type=order_lammps_type,
         )
-        if st.grid_shape[0] != nx or st.grid_shape[1] != ny:
-            raise ValueError(f"Inconsistent nx/ny across dumps. Got {st.grid_shape[:2]}, expected {(nx, ny)}")
-        dump_nzs.append(st.grid_shape[2])
+        nx_i, ny_i, nz_i = st.grid_shape
+        dump_info.append((nx_i, ny_i, nz_i, dp))
 
-    if not pad_to_common_nz:
-        if len(set(dump_nzs)) != 1:
-            raise ValueError(
-                f"pad_to_common_nz is disabled but dumps have different nz. Found nz values: {sorted(set(dump_nzs))}"
-            )
-        common_nz = int(dump_nzs[0])
-    else:
-        if pad_nz_mode == "max":
-            common_nz = int(max(dump_nzs))
-        elif pad_nz_mode == "first":
-            common_nz = int(dump_nzs[0])
-        elif pad_nz_mode == "fixed":
-            if common_nz is None:
-                raise ValueError("--pad_nz_mode fixed requires --common_nz")
-            common_nz = int(common_nz)
+    grouped: Dict[Tuple[int, int], List[Tuple[int, Path]]] = {}
+    for nx_i, ny_i, nz_i, dp in dump_info:
+        grouped.setdefault((nx_i, ny_i), []).append((nz_i, dp))
+
+    if not grouped:
+        raise ValueError(f"No dumps found under {dumps_dir}")
+
+    out_path_p = Path(out_path)
+
+    # If we have only one (nx,ny) group, preserve the old behavior exactly.
+    multiple_groups = len(grouped) > 1
+
+    # Track global max_pairs across all generated datasets (if provided).
+    remaining_pairs = int(max_pairs) if max_pairs is not None else None
+
+    manifest_datasets: List[dict] = []
+
+    for (nx, ny), items in sorted(grouped.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        # Determine nz values for padding decisions in this (nx,ny) group.
+        dump_nzs = [nz_i for nz_i, _ in items]
+
+        if not pad_to_common_nz:
+            if len(set(dump_nzs)) != 1:
+                raise ValueError(
+                    f"pad_to_common_nz is disabled but dumps have different nz within xy={(nx, ny)}. "
+                    f"Found nz values: {sorted(set(dump_nzs))}"
+                )
+            common_nz_i = int(dump_nzs[0])
         else:
-            raise ValueError(f"Invalid pad_nz_mode: {pad_nz_mode}")
+            if pad_nz_mode == "max":
+                common_nz_i = int(max(dump_nzs))
+            elif pad_nz_mode == "first":
+                common_nz_i = int(dump_nzs[0])
+            elif pad_nz_mode == "fixed":
+                if common_nz is None:
+                    raise ValueError("--pad_nz_mode fixed requires --common_nz")
+                common_nz_i = int(common_nz)
+            else:
+                raise ValueError(f"Invalid pad_nz_mode: {pad_nz_mode}")
 
-    common_nz = int(common_nz)  # type: ignore[arg-type]
+        inputs: List[torch.Tensor] = []
+        targets: List[torch.Tensor] = []
+        loss_masks: List[torch.Tensor] = []
 
-    inputs: List[torch.Tensor] = []
-    targets: List[torch.Tensor] = []
-    loss_masks: List[torch.Tensor] = []
+        # Main data loop: build pairs within each dump file.
+        for _nz_i, dump_path in items:
+            frames = make_coarse_states_from_dump(
+                str(dump_path),
+                species=species,
+                grid=grid,
+                order_lammps_type=order_lammps_type,
+            )
+            if len(frames) <= stride_k:
+                continue
 
-    # Main data loop: build pairs within each dump file.
-    for dump_path in dump_paths:
-        frames = make_coarse_states_from_dump(
-            str(dump_path),
-            species=species,
-            grid=grid,
-            order_lammps_type=order_lammps_type,
-        )
-        if len(frames) <= stride_k:
-            continue
+            for i in range(0, len(frames) - stride_k):
+                if remaining_pairs is not None and len(inputs) >= int(remaining_pairs):
+                    break
 
-        for i in range(0, len(frames) - stride_k):
-            if max_pairs is not None and len(inputs) >= int(max_pairs):
+                _t0, in_state, _m0 = frames[i]
+                _t1, tgt_state, _m1 = frames[i + stride_k]
+
+                in_p = (
+                    _pad_state_to_nz(in_state, nx=nx, ny=ny, common_nz=common_nz_i)
+                    if pad_to_common_nz
+                    else in_state
+                )
+                tgt_p = (
+                    _pad_state_to_nz(tgt_state, nx=nx, ny=ny, common_nz=common_nz_i)
+                    if pad_to_common_nz
+                    else tgt_state
+                )
+
+                inputs.append(in_p.as_features())  # (C,nx,ny,common_nz_i)
+                targets.append(tgt_p.as_features())
+
+                if mask_loss_padded_cells:
+                    tgt_nz = tgt_state.grid_shape[2]
+                    loss_masks.append(
+                        _loss_mask_for_state(nx=nx, ny=ny, nz_valid=tgt_nz, common_nz=common_nz_i)
+                    )
+
+            if remaining_pairs is not None and len(inputs) >= int(remaining_pairs):
                 break
 
-            _t0, in_state, _m0 = frames[i]
-            _t1, tgt_state, _m1 = frames[i + stride_k]
+        if not inputs:
+            # No pairs from this group (e.g. stride too large); skip.
+            continue
 
-            in_p = _pad_state_to_nz(in_state, nx=nx, ny=ny, common_nz=common_nz) if pad_to_common_nz else in_state
-            tgt_p = _pad_state_to_nz(tgt_state, nx=nx, ny=ny, common_nz=common_nz) if pad_to_common_nz else tgt_state
+        inputs_t = torch.stack(inputs, dim=0)
+        targets_t = torch.stack(targets, dim=0)
 
-            inputs.append(in_p.as_features())  # (C,nx,ny,common_nz)
-            targets.append(tgt_p.as_features())
+        if remaining_pairs is not None:
+            # Update global remaining based on what we actually added.
+            remaining_pairs = max(0, int(remaining_pairs) - int(inputs_t.shape[0]))
+            if remaining_pairs <= 0:
+                # No more pairs needed globally.
+                pass
 
-            if mask_loss_padded_cells:
-                tgt_nz = tgt_state.grid_shape[2]
-                loss_masks.append(_loss_mask_for_state(nx=nx, ny=ny, nz_valid=tgt_nz, common_nz=common_nz))
+        payload: Dict[str, object] = {
+            "inputs": inputs_t,
+            "targets": targets_t,
+            "metadata": {
+                "species": {"lammps_types": list(species.lammps_types), "masses": list(species.masses)},
+                "grid": {
+                    "a": float(grid.lattice_constant_a),
+                    "periodic_xy": bool(grid.periodic_xy),
+                    "nx": int(nx),
+                    "ny": int(ny),
+                    "nz": int(common_nz_i),
+                },
+                "stride_k": int(stride_k),
+                "num_pairs": int(inputs_t.shape[0]),
+                "pad_to_common_nz": bool(pad_to_common_nz),
+                "pad_nz_mode": str(pad_nz_mode),
+                "order_lammps_type": int(order_lammps_type),
+            },
+        }
 
-        if max_pairs is not None and len(inputs) >= int(max_pairs):
+        if mask_loss_padded_cells:
+            payload["loss_mask"] = torch.stack(loss_masks, dim=0)
+
+        if multiple_groups:
+            # Write per-shape dataset.
+            suffix = f"_nx{nx}_ny{ny}"
+            if out_path_p.suffix == ".pt":
+                out_ds_path = out_path_p.with_name(out_path_p.stem + suffix + out_path_p.suffix)
+            else:
+                out_ds_path = out_path_p / (out_path_p.name + suffix + ".pt")
+        else:
+            out_ds_path = out_path_p
+
+        out_ds_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(payload, str(out_ds_path))
+
+        manifest_datasets.append(
+            {
+                "nx": int(nx),
+                "ny": int(ny),
+                "nz": int(common_nz_i),
+                "dataset_path": str(out_ds_path),
+                "num_pairs": int(inputs_t.shape[0]),
+            }
+        )
+
+        if remaining_pairs is not None and remaining_pairs <= 0:
             break
 
-    if not inputs:
+    if not manifest_datasets:
         raise ValueError(
             "No training pairs produced. "
             f"Check stride_k={stride_k}, dump contents, and max_dump_files/max_pairs."
         )
 
-    inputs_t = torch.stack(inputs, dim=0)
-    targets_t = torch.stack(targets, dim=0)
-
-    payload: Dict[str, object] = {
-        "inputs": inputs_t,
-        "targets": targets_t,
-        "metadata": {
-            "species": {"lammps_types": list(species.lammps_types), "masses": list(species.masses)},
-            "grid": {
-                "a": float(grid.lattice_constant_a),
-                "periodic_xy": bool(grid.periodic_xy),
-                "nx": int(nx),
-                "ny": int(ny),
-                "nz": int(common_nz),
-            },
-            "stride_k": int(stride_k),
-            "num_pairs": int(inputs_t.shape[0]),
+    # If we generated multiple datasets, write a small manifest next to out_path.
+    if multiple_groups:
+        manifest_path = out_path_p.with_name(out_path_p.stem + "_by_xy_manifest.json")
+        manifest_obj = {
+            "out_path_base": str(out_path_p),
+            "generated_datasets": manifest_datasets,
             "pad_to_common_nz": bool(pad_to_common_nz),
             "pad_nz_mode": str(pad_nz_mode),
-            "order_lammps_type": int(order_lammps_type),
-        },
-    }
+            "mask_loss_padded_cells": bool(mask_loss_padded_cells),
+        }
+        import json
 
-    if mask_loss_padded_cells:
-        payload["loss_mask"] = torch.stack(loss_masks, dim=0)
-
-    out_path_p = Path(out_path)
-    out_path_p.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, str(out_path_p))
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(manifest_obj, indent=2), encoding="utf-8")
 
 
 def main() -> None:
@@ -598,7 +667,10 @@ def main() -> None:
         num_workers=int(args.num_workers),
         order_lammps_type=int(args.order_lammps_type),
     )
-    print(f"Wrote dataset: {args.out_path}")
+    if Path(args.out_path).suffix == ".pt":
+        print(f"Done preprocessing dataset(s) into base: {args.out_path}")
+    else:
+        print(f"Done preprocessing dataset(s) into: {args.out_path}")
 
 
 if __name__ == "__main__":

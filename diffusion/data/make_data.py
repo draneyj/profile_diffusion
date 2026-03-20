@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import argparse
 import math
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Generator, Iterable, List, Optional, Tuple
 
-import numpy as np
-import torch
+import numpy as np  # type: ignore
+import torch  # type: ignore
 
 from ..config import GridConfig, SpeciesConfig
 from ..state import CoarseState
@@ -377,7 +378,7 @@ def _pad_state_to_nz(state: CoarseState, *, nx: int, ny: int, common_nz: int) ->
     pad_n = common_nz - nz
     # Pad along last dim (z): (left, right) = (0, pad_n)
     # torch.nn.functional.pad expects (pad_last_dim_left, pad_last_dim_right, ...).
-    import torch.nn.functional as F
+    import torch.nn.functional as F  # type: ignore
 
     counts = F.pad(state.counts, (0, pad_n), mode="constant", value=0.0)
     momentum = F.pad(state.momentum, (0, pad_n), mode="constant", value=0.0)
@@ -400,6 +401,68 @@ def _loss_mask_for_state(
     mask = torch.zeros((1, nx, ny, common_nz), dtype=torch.float32)
     mask[..., :nz_valid] = 1.0
     return mask
+
+
+def _dump_pairs_worker(
+    dump_path: str,
+    *,
+    species: SpeciesConfig,
+    grid: GridConfig,
+    order_lammps_type: int,
+    stride_k: int,
+    pad_to_common_nz: bool,
+    nx: int,
+    ny: int,
+    common_nz: int,
+    mask_loss_padded_cells: bool,
+) -> Tuple[str, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """
+    Build (inputs, targets, optional loss_mask) for a single dump file.
+
+    Returned tensors are on CPU.
+    """
+    frames = make_coarse_states_from_dump(
+        dump_path,
+        species=species,
+        grid=grid,
+        order_lammps_type=order_lammps_type,
+    )
+    if len(frames) <= stride_k:
+        empty = torch.empty((0,), dtype=torch.float32)
+        return dump_path, empty, empty, None if not mask_loss_padded_cells else torch.empty((0,), dtype=torch.float32)
+
+    inputs_list: List[torch.Tensor] = []
+    targets_list: List[torch.Tensor] = []
+    masks_list: List[torch.Tensor] = []
+
+    for i in range(0, len(frames) - stride_k):
+        _t0, in_state, _m0 = frames[i]
+        _t1, tgt_state, _m1 = frames[i + stride_k]
+
+        in_p = (
+            _pad_state_to_nz(in_state, nx=nx, ny=ny, common_nz=common_nz)
+            if pad_to_common_nz
+            else in_state
+        )
+        tgt_p = (
+            _pad_state_to_nz(tgt_state, nx=nx, ny=ny, common_nz=common_nz)
+            if pad_to_common_nz
+            else tgt_state
+        )
+
+        inputs_list.append(in_p.as_features().cpu())  # (C,nx,ny,common_nz)
+        targets_list.append(tgt_p.as_features().cpu())
+
+        if mask_loss_padded_cells:
+            tgt_nz = tgt_state.grid_shape[2]
+            masks_list.append(
+                _loss_mask_for_state(nx=nx, ny=ny, nz_valid=tgt_nz, common_nz=common_nz).cpu()
+            )
+
+    inputs_t = torch.stack(inputs_list, dim=0)  # (K,C,nx,ny,common_nz)
+    targets_t = torch.stack(targets_list, dim=0)
+    masks_t = torch.stack(masks_list, dim=0) if mask_loss_padded_cells else None
+    return dump_path, inputs_t, targets_t, masks_t
 
 
 def build_dataset(
@@ -484,64 +547,79 @@ def build_dataset(
             else:
                 raise ValueError(f"Invalid pad_nz_mode: {pad_nz_mode}")
 
-        inputs: List[torch.Tensor] = []
-        targets: List[torch.Tensor] = []
-        loss_masks: List[torch.Tensor] = []
+        input_chunks: List[torch.Tensor] = []
+        target_chunks: List[torch.Tensor] = []
+        loss_chunks: List[torch.Tensor] = []
 
-        # Main data loop: build pairs within each dump file.
-        for _nz_i, dump_path in items:
-            frames = make_coarse_states_from_dump(
-                str(dump_path),
-                species=species,
-                grid=grid,
-                order_lammps_type=order_lammps_type,
-            )
-            if len(frames) <= stride_k:
+        # Build pairs within each dump file (parallel across dumps).
+        # We never mix shapes inside a batch because each (nx,ny) group is processed
+        # into a single consistent tensor shape.
+        dump_paths_in_group = [dp for (_nz, dp) in items]
+
+        if int(num_workers) > 1 and len(dump_paths_in_group) > 1:
+            with ProcessPoolExecutor(max_workers=int(num_workers)) as ex:
+                futures = [
+                    ex.submit(
+                        _dump_pairs_worker,
+                        str(dp),
+                        species=species,
+                        grid=grid,
+                        order_lammps_type=order_lammps_type,
+                        stride_k=stride_k,
+                        pad_to_common_nz=pad_to_common_nz,
+                        nx=nx,
+                        ny=ny,
+                        common_nz=common_nz_i,
+                        mask_loss_padded_cells=mask_loss_padded_cells,
+                    )
+                    for dp in dump_paths_in_group
+                ]
+                results = [f.result() for f in futures]
+        else:
+            results = [
+                _dump_pairs_worker(
+                    str(dp),
+                    species=species,
+                    grid=grid,
+                    order_lammps_type=order_lammps_type,
+                    stride_k=stride_k,
+                    pad_to_common_nz=pad_to_common_nz,
+                    nx=nx,
+                    ny=ny,
+                    common_nz=common_nz_i,
+                    mask_loss_padded_cells=mask_loss_padded_cells,
+                )
+                for dp in dump_paths_in_group
+            ]
+
+        for _dump_path_str, inputs_t, targets_t, masks_t in results:
+            if int(inputs_t.shape[0]) == 0:
                 continue
 
-            for i in range(0, len(frames) - stride_k):
-                if remaining_pairs is not None and len(inputs) >= int(remaining_pairs):
-                    break
+            take = int(inputs_t.shape[0])
+            if remaining_pairs is not None:
+                take = min(take, int(remaining_pairs))
 
-                _t0, in_state, _m0 = frames[i]
-                _t1, tgt_state, _m1 = frames[i + stride_k]
-
-                in_p = (
-                    _pad_state_to_nz(in_state, nx=nx, ny=ny, common_nz=common_nz_i)
-                    if pad_to_common_nz
-                    else in_state
-                )
-                tgt_p = (
-                    _pad_state_to_nz(tgt_state, nx=nx, ny=ny, common_nz=common_nz_i)
-                    if pad_to_common_nz
-                    else tgt_state
-                )
-
-                inputs.append(in_p.as_features())  # (C,nx,ny,common_nz_i)
-                targets.append(tgt_p.as_features())
-
-                if mask_loss_padded_cells:
-                    tgt_nz = tgt_state.grid_shape[2]
-                    loss_masks.append(
-                        _loss_mask_for_state(nx=nx, ny=ny, nz_valid=tgt_nz, common_nz=common_nz_i)
-                    )
-
-            if remaining_pairs is not None and len(inputs) >= int(remaining_pairs):
+            if take <= 0:
                 break
 
-        if not inputs:
+            input_chunks.append(inputs_t[:take])
+            target_chunks.append(targets_t[:take])
+            if mask_loss_padded_cells and masks_t is not None:
+                loss_chunks.append(masks_t[:take])
+
+            if remaining_pairs is not None:
+                remaining_pairs = int(remaining_pairs) - int(take)
+                if remaining_pairs <= 0:
+                    break
+
+        if not input_chunks:
             # No pairs from this group (e.g. stride too large); skip.
             continue
 
-        inputs_t = torch.stack(inputs, dim=0)
-        targets_t = torch.stack(targets, dim=0)
-
-        if remaining_pairs is not None:
-            # Update global remaining based on what we actually added.
-            remaining_pairs = max(0, int(remaining_pairs) - int(inputs_t.shape[0]))
-            if remaining_pairs <= 0:
-                # No more pairs needed globally.
-                pass
+        inputs_t = torch.cat(input_chunks, dim=0)
+        targets_t = torch.cat(target_chunks, dim=0)
+        loss_masks_t = torch.cat(loss_chunks, dim=0) if mask_loss_padded_cells and loss_chunks else None
 
         payload: Dict[str, object] = {
             "inputs": inputs_t,
@@ -564,7 +642,9 @@ def build_dataset(
         }
 
         if mask_loss_padded_cells:
-            payload["loss_mask"] = torch.stack(loss_masks, dim=0)
+            if loss_masks_t is None:
+                raise ValueError("Expected loss_masks_t but got None")
+            payload["loss_mask"] = loss_masks_t
 
         if multiple_groups:
             # Write per-shape dataset.
@@ -642,7 +722,12 @@ def main() -> None:
     parser.add_argument("--common_nz", type=int, default=None, help="Used only with --pad_nz_mode fixed.")
     parser.add_argument("--mask_loss_padded_cells", action="store_true", help="Save a loss_mask to ignore padded cells.")
 
-    parser.add_argument("--num_workers", type=int, default=1, help="Reserved for future parallelism.")
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=1,
+        help="Number of worker processes for parallel dump processing (within each (nx,ny) group).",
+    )
 
     args = parser.parse_args()
 

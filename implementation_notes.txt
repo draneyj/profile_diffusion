@@ -54,3 +54,28 @@ Decisions made (implementation-specific)
     by 3 voxels in x/y (circular) and 3 voxels in z (zero) before applying the network to keep the output grid shape
     identical to the input grid (avoids channel/spatial mismatches during refinement).
 
+16. XY-shape mismatches across dumps: if different `*.dump` files produce different `(nx, ny)` grid sizes, `diffusion/data/make_data.py`
+    now **splits preprocessing by `(nx, ny)`** and writes one `dataset.pt` per unique `(nx, ny)` group.
+    - Output naming when `--out_path` is `.../dataset.pt` and multiple shapes exist:
+      `dataset_nx{nx}_ny{ny}.pt` plus a `dataset_by_xy_manifest.json` listing generated datasets.
+    - No padding is applied in x/y: because x/y are periodic and boxes may differ physically, training batches are kept shape-consistent.
+
+17. Per-shape interleaved training with proportional balancing: `diffusion/train.py` now supports training across multiple
+    per-shape datasets (from item #16) without mixing shapes inside a batch.
+    - New CLI args:
+      - `--dataset_paths`: comma-separated list of dataset files
+      - `--shape_balance_mode {proportional,equal}`: how to sample batches from datasets
+    - In `proportional` mode, each dataset is sampled proportional to its **number of training pairs** after the train/val split.
+
+18. Visualization z-orientation default: `diffusion/visualize_dump_zt.py` now defaults to matplotlib `origin="lower"` so the visual
+    z-direction matches the dump’s physical z direction.
+    - Use `--origin_upper` to flip vertically back to the old behavior.
+
+19. Slurm script simplification & repo root assumptions:
+    - `scripts/slurm_preprocess_all.sbatch` and `scripts/slurm_train_option_i.sbatch` are intentionally kept simple templates that
+      assume you run/copy-submit them from the repo root (so `diffusion` package import works).
+    - `diffusion/data/make_data.py` is invoked via `python -m diffusion.data.make_data` (no inline Python launcher).
+
+20. Git ignore scope fix for code/data separation:
+    - `.gitignore` anchors the ignored dataset directory to `/data/` (top-level) so `diffusion/data/` (code) remains tracked.
+

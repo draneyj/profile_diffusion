@@ -403,6 +403,7 @@ def main() -> None:
             running_val_loss_sum = 0.0
             running_val_n = 0
             running_vc = running_vm = running_vke = running_vo = 0.0
+            running_val_flux_reg = 0.0
             with torch.no_grad():
                 for ds_idx, d in enumerate(per_dataset):
                     if d["dl_val"] is None:

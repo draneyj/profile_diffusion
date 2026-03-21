@@ -113,3 +113,8 @@ Why this is a good hybrid:
     * Easier to optimize than Option II hard greedy integer transfer
     * Keeps flux interpretation while avoiding many discontinuities during training
 
+Training (diffusion/train.py):
+    * Optional flux regularization: --flux_reg_weight > 0 adds a mean-squared penalty on constrained/projected
+      face fluxes (Option II: after per-cell scale; Option III: after alpha projection) to prefer smaller transfers
+      and calmer rollouts. Option I passes a zero flux term for a uniform API.
+

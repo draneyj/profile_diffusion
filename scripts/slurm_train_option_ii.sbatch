@@ -29,6 +29,7 @@ EPOCHS=100
 BATCH_SIZE=100
 LR=1e-3
 HIDDEN_CHANNELS=64
+FLUX_REG_WEIGHT=1e-4   # mean-sq flux penalty on constrained face fluxes (see diffusion.train --flux_reg_weight)
 SOFT_TRANSFER=1   # 1: use differentiable soft transfer in training, 0: force hard_eval
 
 VAL_FRACTION=0.1
@@ -70,6 +71,7 @@ CMD=(python -u -m diffusion.train
   --val_fraction "$VAL_FRACTION"
   --save_every_n_epochs "$SAVE_EVERY_N_EPOCHS"
   --learning_curve_path data/processed/learning_curve_optionii.csv
+  --flux_reg_weight "$FLUX_REG_WEIGHT"
   --device cuda
 )
 

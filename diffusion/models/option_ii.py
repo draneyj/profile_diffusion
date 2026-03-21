@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -445,14 +445,26 @@ class OptionIIModel(nn.Module):
         }
         return scale, scaled
 
-    def _soft_transfer(self, state: CoarseState, fluxes: dict) -> CoarseState:
+    @staticmethod
+    def flux_regularization_scaled(scaled: dict) -> torch.Tensor:
+        """
+        Mean squared magnitude of constrained (scaled) face fluxes — encourages smaller transfers for stability.
+        One scalar per batch element is averaged into a single loss term via .mean().
+        """
+        parts = []
+        for v in scaled.values():
+            parts.append((v * v).mean())
+        return torch.stack(parts).mean()
+
+    def _soft_transfer(self, state: CoarseState, fluxes: dict, scaled: Optional[dict] = None) -> CoarseState:
         counts, momentum, ke, order = self._extract_state_components(state)
         # Ensure batched.
         if counts.dim() != 5:
             raise ValueError("_soft_transfer expects batched state")
 
         # Constrained scaling to prevent negative counts/KE.
-        _, scaled = self._constrained_scale(state, fluxes)
+        if scaled is None:
+            _, scaled = self._constrained_scale(state, fluxes)
         atom_flux = scaled["atom_flux"]  # (B,F,S,nx,ny,nz)
         material_mom_rot = scaled["material_momentum_flux"]  # (B,F,S,3,nx,ny,nz)
         material_ke = scaled["material_ke_flux"]  # (B,F,S,nx,ny,nz)
@@ -628,12 +640,16 @@ class OptionIIModel(nn.Module):
         current_state: CoarseState,
         *,
         target_state: Optional[CoarseState] = None,
-    ) -> CoarseState:
+        return_flux_reg: bool = False,
+    ) -> Union[CoarseState, Tuple[CoarseState, torch.Tensor]]:
         """
         Predict next state using flux transfer.
 
         Note: `target_state` is unused (Option II doesn't require it for prediction),
         but it is accepted for interface compatibility with Option I.
+
+        If ``return_flux_reg`` is True, returns ``(next_state, flux_reg)`` where ``flux_reg`` is a scalar
+        tensor (mean squared constrained flux magnitudes) for optional regularization during training.
         """
 
         input_batched = current_state.counts.dim() == 5
@@ -649,8 +665,18 @@ class OptionIIModel(nn.Module):
         fluxes = self._predict_fluxes(current_state)
 
         use_soft = self.soft_transfer and (self.training or self.force_soft_transfer_eval)
+        flux_reg: Optional[torch.Tensor] = None
+        scaled_pre: Optional[dict] = None
+        if return_flux_reg:
+            _, scaled_pre = self._constrained_scale(current_state, fluxes)
+            flux_reg = self.flux_regularization_scaled(scaled_pre)
+
         if use_soft:
-            next_state = self._soft_transfer(current_state, fluxes)
+            next_state = self._soft_transfer(
+                current_state,
+                fluxes,
+                scaled=scaled_pre if return_flux_reg else None,
+            )
         else:
             next_state = self._hard_transfer(current_state, fluxes)
 
@@ -663,11 +689,15 @@ class OptionIIModel(nn.Module):
 
         if not input_batched:
             # Squeeze batch dimension back to unbatched.
-            return CoarseState(
+            next_state = CoarseState(
                 counts=next_state.counts[0],
                 momentum=next_state.momentum[0],
                 ke=next_state.ke[0],
                 order=next_state.order[0],
             )
+
+        if return_flux_reg:
+            assert flux_reg is not None
+            return next_state, flux_reg
         return next_state
 

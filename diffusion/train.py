@@ -4,8 +4,7 @@ import argparse
 import csv
 import os
 import math
-from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -21,6 +20,67 @@ from .state import CoarseState
 
 def _mse(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.mean((a - b) ** 2)
+
+
+def _target_rms(t: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+    """Detached RMS of target for loss scaling (per batch)."""
+    if mask is None:
+        return torch.sqrt(torch.mean(t * t) + 1e-20)
+    se = (t * t) * mask
+    denom = mask.sum() * t.shape[1]
+    return torch.sqrt(se.sum() / denom.clamp(min=1.0) + 1e-20)
+
+
+def _scaled_mse(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: Optional[torch.Tensor],
+    *,
+    rms_floor: float,
+) -> torch.Tensor:
+    """
+    MSE(pred, target) divided by max(RMS(target)^2, rms_floor^2).
+    Keeps gradients on pred/target difference only (scale detached from target).
+    """
+    rms = _target_rms(target, mask).detach()
+    scale_sq = torch.clamp(rms * rms, min=float(rms_floor) ** 2)
+    if mask is None:
+        return _mse(pred, target) / scale_sq
+    return _masked_mse(pred, target, mask) / scale_sq
+
+
+def compute_state_loss(
+    pred: CoarseState,
+    target: CoarseState,
+    mask: Optional[torch.Tensor],
+    *,
+    loss_balance: str,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Returns (loss_counts, loss_momentum, loss_ke, loss_order, loss_total).
+    loss_balance: 'none' = raw mean MSE per field, summed; 'rms' = MSE scaled by target RMS per field (recommended for ii/iii).
+    """
+    if loss_balance == "none":
+        if mask is None:
+            lc = _mse(pred.counts, target.counts)
+            lm = _mse(pred.momentum, target.momentum)
+            lk = _mse(pred.ke, target.ke)
+            lo = _mse(pred.order, target.order)
+        else:
+            lc = _masked_mse(pred.counts, target.counts, mask)
+            lm = _masked_mse(pred.momentum, target.momentum, mask)
+            lk = _masked_mse(pred.ke, target.ke, mask)
+            lo = _masked_mse(pred.order, target.order, mask)
+    elif loss_balance == "rms":
+        # Floors avoid blowing up scale when a channel is near-zero everywhere.
+        lc = _scaled_mse(pred.counts, target.counts, mask, rms_floor=1.0)
+        lm = _scaled_mse(pred.momentum, target.momentum, mask, rms_floor=1.0)
+        lk = _scaled_mse(pred.ke, target.ke, mask, rms_floor=1e-3)
+        lo = _scaled_mse(pred.order, target.order, mask, rms_floor=0.25)
+    else:
+        raise ValueError(f"Unknown loss_balance: {loss_balance!r}")
+    total = lc + lm + lk + lo
+    return lc, lm, lk, lo, total
 
 
 def _masked_mse(a: torch.Tensor, b: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -74,6 +134,21 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=1e-3)
+    parser.add_argument(
+        "--loss_balance",
+        type=str,
+        default="auto",
+        choices=["auto", "none", "rms"],
+        help="auto: for option ii/iii use RMS-normalized MSE per field (counts/momentum/ke/order); "
+        "none: raw mean MSE summed (momentum/KE often dominate scale).",
+    )
+    parser.add_argument(
+        "--flux_reg_weight",
+        type=float,
+        default=0.0,
+        help="If > 0, add flux_reg_weight * L2-style penalty on constrained/projected face fluxes "
+        "(Option II/III; Option I contributes 0). Encourages smaller transfers for rollout stability.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--val_fraction", type=float, default=0.1, help="Fraction of samples used for validation.")
     parser.add_argument(
@@ -101,6 +176,11 @@ def main() -> None:
     add_common_io_args(parser)
 
     args = parser.parse_args()
+    if args.loss_balance == "auto":
+        loss_balance: str = "rms" if args.option in ("ii", "iii") else "none"
+    else:
+        loss_balance = str(args.loss_balance)
+
     seed_all(args.seed)
     device_cfg = parse_device(args)
 
@@ -228,9 +308,12 @@ def main() -> None:
         else os.path.join(out_dir, f"learning_curve_option{args.option}.csv")
     )
     os.makedirs(os.path.dirname(learning_curve_path) or ".", exist_ok=True)
+    curve_header = ["epoch", "train_loss", "val_loss"]
+    if loss_balance == "rms":
+        curve_header += ["train_c", "train_m", "train_ke", "train_o", "val_c", "val_m", "val_ke", "val_o"]
     with open(learning_curve_path, "w", newline="", encoding="utf-8") as f_curve:
         writer = csv.writer(f_curve)
-        writer.writerow(["epoch", "train_loss", "val_loss"])
+        writer.writerow(curve_header)
 
     # Training interleave weights across datasets (shape balance).
     train_sizes = torch.tensor([d["num_train_samples"] for d in per_dataset], dtype=torch.float64)
@@ -245,9 +328,14 @@ def main() -> None:
     total_train_samples = int(train_sizes.sum().item())
     steps_per_epoch = max(1, int(math.ceil(total_train_samples / float(args.batch_size))))
 
+    flux_reg_w = float(args.flux_reg_weight)
+    use_flux_reg = flux_reg_w > 0.0
+
     for epoch in range(1, args.epochs + 1):
         running_train_loss_sum = 0.0
         running_train_n = 0
+        running_tc = running_tm = running_tke = running_to = 0.0
+        running_train_flux_reg = 0.0
 
         train_iters = [iter(d["dl_train"]) for d in per_dataset]
 
@@ -274,19 +362,17 @@ def main() -> None:
             current = features_batch_to_state(xb, num_species=num_species)
             target = features_batch_to_state(yb, num_species=num_species)
 
-            pred = model.predict_next(current, target_state=target)
-
-            if len(batch) == 3:
-                loss_counts = _masked_mse(pred.counts, target.counts, mb)
-                loss_momentum = _masked_mse(pred.momentum, target.momentum, mb)
-                loss_ke = _masked_mse(pred.ke, target.ke, mb)
-                loss_order = _masked_mse(pred.order, target.order, mb)
+            if use_flux_reg:
+                pred, flux_reg = model.predict_next(current, target_state=target, return_flux_reg=True)
             else:
-                loss_counts = _mse(pred.counts, target.counts)
-                loss_momentum = _mse(pred.momentum, target.momentum)
-                loss_ke = _mse(pred.ke, target.ke)
-                loss_order = _mse(pred.order, target.order)
-            loss = loss_counts + loss_momentum + loss_ke + loss_order
+                pred = model.predict_next(current, target_state=target)
+
+            mb_opt: Optional[torch.Tensor] = mb if len(batch) == 3 else None
+            loss_counts, loss_momentum, loss_ke, loss_order, loss = compute_state_loss(
+                pred, target, mb_opt, loss_balance=loss_balance
+            )
+            if use_flux_reg:
+                loss = loss + flux_reg_w * flux_reg
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -295,14 +381,28 @@ def main() -> None:
             bs = int(xb.shape[0])
             running_train_loss_sum += float(loss.item()) * bs
             running_train_n += bs
+            running_tc += float(loss_counts.item()) * bs
+            running_tm += float(loss_momentum.item()) * bs
+            running_tke += float(loss_ke.item()) * bs
+            running_to += float(loss_order.item()) * bs
+            if use_flux_reg:
+                running_train_flux_reg += float(flux_reg.item()) * bs
 
         avg_train = running_train_loss_sum / max(1, running_train_n)
+        avg_tc = running_tc / max(1, running_train_n)
+        avg_tm = running_tm / max(1, running_train_n)
+        avg_tke = running_tke / max(1, running_train_n)
+        avg_to = running_to / max(1, running_train_n)
+        avg_train_flux_reg = running_train_flux_reg / max(1, running_train_n) if use_flux_reg else 0.0
 
         avg_val = None
+        avg_vc = avg_vm = avg_vke = avg_vo = 0.0
+        avg_val_flux_reg = 0.0
         if any(d["dl_val"] is not None for d in per_dataset):
             model.eval()
             running_val_loss_sum = 0.0
             running_val_n = 0
+            running_vc = running_vm = running_vke = running_vo = 0.0
             with torch.no_grad():
                 for ds_idx, d in enumerate(per_dataset):
                     if d["dl_val"] is None:
@@ -319,24 +419,35 @@ def main() -> None:
 
                         current = features_batch_to_state(xb, num_species=num_species)
                         target = features_batch_to_state(yb, num_species=num_species)
-                        pred = model.predict_next(current, target_state=target)
-
-                        if len(batch) == 3:
-                            loss_counts = _masked_mse(pred.counts, target.counts, mb)
-                            loss_momentum = _masked_mse(pred.momentum, target.momentum, mb)
-                            loss_ke = _masked_mse(pred.ke, target.ke, mb)
-                            loss_order = _masked_mse(pred.order, target.order, mb)
+                        if use_flux_reg:
+                            pred, flux_reg_v = model.predict_next(
+                                current, target_state=target, return_flux_reg=True
+                            )
                         else:
-                            loss_counts = _mse(pred.counts, target.counts)
-                            loss_momentum = _mse(pred.momentum, target.momentum)
-                            loss_ke = _mse(pred.ke, target.ke)
-                            loss_order = _mse(pred.order, target.order)
-                        loss = loss_counts + loss_momentum + loss_ke + loss_order
+                            pred = model.predict_next(current, target_state=target)
+
+                        mb_val: Optional[torch.Tensor] = mb if len(batch) == 3 else None
+                        loss_counts, loss_momentum, loss_ke, loss_order, loss = compute_state_loss(
+                            pred, target, mb_val, loss_balance=loss_balance
+                        )
+                        if use_flux_reg:
+                            loss = loss + flux_reg_w * flux_reg_v
                         bs = int(xb.shape[0])
                         running_val_loss_sum += float(loss.item()) * bs
                         running_val_n += bs
+                        running_vc += float(loss_counts.item()) * bs
+                        running_vm += float(loss_momentum.item()) * bs
+                        running_vke += float(loss_ke.item()) * bs
+                        running_vo += float(loss_order.item()) * bs
+                        if use_flux_reg:
+                            running_val_flux_reg += float(flux_reg_v.item()) * bs
 
             avg_val = running_val_loss_sum / max(1, running_val_n)
+            avg_vc = running_vc / max(1, running_val_n)
+            avg_vm = running_vm / max(1, running_val_n)
+            avg_vke = running_vke / max(1, running_val_n)
+            avg_vo = running_vo / max(1, running_val_n)
+            avg_val_flux_reg = running_val_flux_reg / max(1, running_val_n) if use_flux_reg else 0.0
             model.train()
 
         # Checkpoint cadence: save only every N epochs plus always the final epoch.
@@ -355,17 +466,71 @@ def main() -> None:
                     "num_refine_steps": args.num_refine_steps,
                     "noise_std": args.noise_std,
                     "soft_transfer": bool(args.soft_transfer or (not args.hard_eval)),
+                    "loss_balance": loss_balance,
+                    "flux_reg_weight": flux_reg_w,
                 },
                 ckpt_path,
             )
 
+        flux_msg = ""
+        if use_flux_reg:
+            flux_msg = f" flux_reg={avg_train_flux_reg:.6g} (w*flux={flux_reg_w * avg_train_flux_reg:.6g})"
+            if avg_val is not None:
+                flux_msg += f" val_flux_reg={avg_val_flux_reg:.6g}"
+
         if avg_val is None:
-            print(f"[epoch {epoch}] train_loss={avg_train:.6f}", flush=True)
+            if loss_balance == "rms":
+                print(
+                    f"[epoch {epoch}] train_loss={avg_train:.6f} "
+                    f"(c={avg_tc:.4f} m={avg_tm:.4f} ke={avg_tke:.4f} o={avg_to:.4f}){flux_msg}",
+                    flush=True,
+                )
+            else:
+                print(f"[epoch {epoch}] train_loss={avg_train:.6f}{flux_msg}", flush=True)
         else:
-            print(f"[epoch {epoch}] train_loss={avg_train:.6f} val_loss={avg_val:.6f}", flush=True)
+            if loss_balance == "rms":
+                print(
+                    f"[epoch {epoch}] train_loss={avg_train:.6f} val_loss={avg_val:.6f} "
+                    f"train[c,m,ke,o]={avg_tc:.4f},{avg_tm:.4f},{avg_tke:.4f},{avg_to:.4f} "
+                    f"val[c,m,ke,o]={avg_vc:.4f},{avg_vm:.4f},{avg_vke:.4f},{avg_vo:.4f}{flux_msg}",
+                    flush=True,
+                )
+            else:
+                print(f"[epoch {epoch}] train_loss={avg_train:.6f} val_loss={avg_val:.6f}{flux_msg}", flush=True)
         with open(learning_curve_path, "a", newline="", encoding="utf-8") as f_curve:
             writer = csv.writer(f_curve)
-            writer.writerow([epoch, f"{avg_train:.10f}", "" if avg_val is None else f"{avg_val:.10f}"])
+            if loss_balance == "rms":
+                if avg_val is None:
+                    row = [
+                        epoch,
+                        f"{avg_train:.10f}",
+                        "",
+                        f"{avg_tc:.10f}",
+                        f"{avg_tm:.10f}",
+                        f"{avg_tke:.10f}",
+                        f"{avg_to:.10f}",
+                        "",
+                        "",
+                        "",
+                        "",
+                    ]
+                else:
+                    row = [
+                        epoch,
+                        f"{avg_train:.10f}",
+                        f"{avg_val:.10f}",
+                        f"{avg_tc:.10f}",
+                        f"{avg_tm:.10f}",
+                        f"{avg_tke:.10f}",
+                        f"{avg_to:.10f}",
+                        f"{avg_vc:.10f}",
+                        f"{avg_vm:.10f}",
+                        f"{avg_vke:.10f}",
+                        f"{avg_vo:.10f}",
+                    ]
+            else:
+                row = [epoch, f"{avg_train:.10f}", "" if avg_val is None else f"{avg_val:.10f}"]
+            writer.writerow(row)
 
 
 if __name__ == "__main__":

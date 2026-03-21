@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -122,6 +122,21 @@ class OptionIIIModel(nn.Module):
 
         return atom_out_face, ke_out_face, mom_face
 
+    @staticmethod
+    def flux_regularization_projected(
+        atom_out_face: torch.Tensor,
+        ke_out_face: torch.Tensor,
+        mom_face: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Mean squared projected face fluxes (atoms, KE, momentum) — encourages smaller transfers.
+        """
+        return (
+            (atom_out_face * atom_out_face).mean()
+            + (ke_out_face * ke_out_face).mean()
+            + (mom_face * mom_face).mean()
+        ) / 3.0
+
     def _project_fluxes(
         self,
         state: CoarseState,
@@ -206,7 +221,8 @@ class OptionIIIModel(nn.Module):
         current_state: CoarseState,
         *,
         target_state: Optional[CoarseState] = None,
-    ) -> CoarseState:
+        return_flux_reg: bool = False,
+    ) -> Union[CoarseState, Tuple[CoarseState, torch.Tensor]]:
         input_batched = current_state.counts.dim() == 5
         if not input_batched:
             current_state = CoarseState(
@@ -218,6 +234,9 @@ class OptionIIIModel(nn.Module):
 
         atom_out_face, ke_out_face, mom_face = self._predict_raw_fluxes(current_state)
         atom_out_face, ke_out_face, mom_face = self._project_fluxes(current_state, atom_out_face, ke_out_face, mom_face)
+        flux_reg: Optional[torch.Tensor] = None
+        if return_flux_reg:
+            flux_reg = self.flux_regularization_projected(atom_out_face, ke_out_face, mom_face)
         next_state = self._apply_fluxes(current_state, atom_out_face, ke_out_face, mom_face)
 
         if (not self.training) and self.hard_round_counts_eval:
@@ -225,11 +244,15 @@ class OptionIIIModel(nn.Module):
             next_state.ke = torch.clamp(next_state.ke, min=0.0)
 
         if not input_batched:
-            return CoarseState(
+            next_state = CoarseState(
                 counts=next_state.counts[0],
                 momentum=next_state.momentum[0],
                 ke=next_state.ke[0],
                 order=next_state.order[0],
             )
+
+        if return_flux_reg:
+            assert flux_reg is not None
+            return next_state, flux_reg
         return next_state
 

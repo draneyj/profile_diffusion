@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -127,9 +127,13 @@ class OptionIModel(nn.Module):
         current_state: CoarseState,
         *,
         target_state: Optional[CoarseState] = None,
-    ) -> CoarseState:
+        return_flux_reg: bool = False,
+    ) -> Union[CoarseState, Tuple[CoarseState, torch.Tensor]]:
         """
         Returns predicted next state.
+
+        If ``return_flux_reg`` is True, returns ``(pred, flux_reg)`` with ``flux_reg`` a zero scalar
+        (Option I has no fluxes; for a uniform training API).
         """
 
         cond_features = current_state.as_features()  # (B,C,nx,ny,nz) or (C,nx,ny,nz)
@@ -154,5 +158,9 @@ class OptionIModel(nn.Module):
 
         if not self.training:
             pred = self._postprocess_eval(pred)
+
+        if return_flux_reg:
+            z = torch.zeros((), device=x_est.device, dtype=x_est.dtype)
+            return pred, z
         return pred
 

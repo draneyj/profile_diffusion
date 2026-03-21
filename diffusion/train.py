@@ -15,6 +15,7 @@ from .cli_utils import add_device_arg, add_common_io_args, parse_device, seed_al
 from .config import GridConfig
 from .models.option_i import OptionIModel
 from .models.option_ii import OptionIIModel
+from .models.option_iii import OptionIIIModel
 from .state import CoarseState
 
 
@@ -54,8 +55,8 @@ def features_batch_to_state(features: torch.Tensor, *, num_species: int) -> Coar
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train Option I or Option II diffusion models.")
-    parser.add_argument("--option", type=str, choices=["i", "ii"], required=True)
+    parser = argparse.ArgumentParser(description="Train Option I/II/III diffusion models.")
+    parser.add_argument("--option", type=str, choices=["i", "ii", "iii"], required=True)
     parser.add_argument("--dataset_path", type=str, default="data/processed/dataset.pt")
     parser.add_argument(
         "--dataset_paths",
@@ -198,11 +199,16 @@ def main() -> None:
             num_refine_steps=args.num_refine_steps,
             noise_std=args.noise_std,
         )
-    else:
+    elif args.option == "ii":
         model = OptionIIModel(
             num_species=num_species,
             hidden_channels=args.hidden_channels,
             soft_transfer=args.soft_transfer or (not args.hard_eval),
+        )
+    else:
+        model = OptionIIIModel(
+            num_species=num_species,
+            hidden_channels=args.hidden_channels,
         )
 
     model.to(device_cfg.device)

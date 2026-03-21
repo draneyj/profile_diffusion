@@ -12,6 +12,7 @@ from .cli_utils import add_device_arg, parse_device, seed_all
 from .config import GridConfig, SpeciesConfig
 from .models.option_i import OptionIModel
 from .models.option_ii import OptionIIModel
+from .models.option_iii import OptionIIIModel
 from .state import CoarseState
 from .data.make_data import make_coarse_state_from_dump
 
@@ -43,12 +44,19 @@ def _instantiate_model(option: str, ckpt: dict, device: torch.device):
             num_refine_steps=ckpt.get("num_refine_steps", 1),
             noise_std=ckpt.get("noise_std", 0.1),
         )
-    else:
+    elif option == "ii":
         model = OptionIIModel(
             num_species=num_species,
             hidden_channels=model_kwargs["hidden_channels"],
             soft_transfer=True,
         )
+    elif option == "iii":
+        model = OptionIIIModel(
+            num_species=num_species,
+            hidden_channels=model_kwargs["hidden_channels"],
+        )
+    else:
+        raise ValueError(f"Unknown option: {option}")
     model.to(device)
     model.eval()
     if option == "ii":
@@ -60,7 +68,7 @@ def _instantiate_model(option: str, ckpt: dict, device: torch.device):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run multi-step inference/rollout with a trained model.")
-    parser.add_argument("--option", type=str, choices=["i", "ii"], required=True)
+    parser.add_argument("--option", type=str, choices=["i", "ii", "iii"], required=True)
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--initial_dump", type=str, required=True, help="Path to a LAMMPS dump file.")
     parser.add_argument("--num_steps", type=int, default=10)

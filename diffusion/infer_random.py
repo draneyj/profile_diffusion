@@ -11,6 +11,7 @@ import torch
 from .cli_utils import add_device_arg, parse_device, seed_all
 from .models.option_i import OptionIModel
 from .models.option_ii import OptionIIModel
+from .models.option_iii import OptionIIIModel
 from .state import CoarseState
 
 
@@ -47,6 +48,11 @@ def _instantiate_from_checkpoint(option: str, ckpt: dict, device: torch.device):
             hidden_channels=hidden_channels,
             soft_transfer=soft_transfer,
         )
+    elif option == "iii":
+        model = OptionIIIModel(
+            num_species=num_species,
+            hidden_channels=hidden_channels,
+        )
     else:
         raise ValueError(f"Unknown option={option}")
 
@@ -66,7 +72,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run inference starting from a random coarse-grained state sampled from a dataset."
     )
-    parser.add_argument("--option", type=str, choices=["i", "ii"], required=True)
+    parser.add_argument("--option", type=str, choices=["i", "ii", "iii"], required=True)
     parser.add_argument("--dataset_path", type=str, required=True)
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--num_steps", type=int, default=20)

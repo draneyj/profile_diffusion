@@ -68,3 +68,48 @@ Drawbacks:
         This means ALL fluxes must be predicted and computed. Gradient tracking will be a massive undertaking and training
         may be slow or even impossible.
         
+
+=================================================================================================================
+
+OPTION III: Hybrid approach.
+
+For each cell, the cell takes in the current and 26 surrounding cell data:
+    * Number of each atom type
+    * total momentum (3-vector)
+    * total KE (kinetic energy)
+    * order parameter
+Then it predicts:
+    * Constrained latent variables (not direct unconstrained fluxes):
+        * For each species s:
+            - one scalar z_out_s -> f_out_s = sigmoid(z_out_s) in [0,1]
+            - six face logits z_face_s[6] -> p_face_s = softmax(z_face_s), sum_f p_face_s[f] = 1
+            - outgoing atom flux on each face: out_s[f] = N_s * f_out_s * p_face_s[f]
+        * For kinetic energy:
+            - one scalar z_out_ke -> f_out_ke = sigmoid(z_out_ke) in [0,1]
+            - six face logits z_face_ke[6] -> p_face_ke = softmax(z_face_ke)
+            - outgoing KE flux on each face: out_ke[f] = KE * f_out_ke * p_face_ke[f]
+        * For momentum:
+            - direct signed face fluxes per component (can be negative), optionally bounded with tanh scaling.
+    * This guarantees by construction:
+        * Nonnegative atom/KE fluxes
+        * Sum of outgoing atom/KE fluxes cannot exceed what is available in the source cell
+        * Stable differentiable training (no integer rounding in the forward pass)
+
+Then apply fluxes to get next state:
+    1) Compute outgoing and incoming fluxes per face.
+    2) Update counts, momentum, KE with soft (float) transfers during training.
+    3) Apply a projection/correction step to enforce conservation/validity constraints.
+    4) In inference, optionally apply hard/integer atom transfer after soft prediction.
+
+Projection/correction step (post-processing, differentiable-friendly):
+    * If any updated cell has negative counts or negative KE, scale that cell's outgoing fluxes by a factor alpha in [0,1]
+      so all constraints are satisfied.
+    * Recompute incoming/outgoing totals after scaling.
+    * Optionally apply a small global correction to remove numerical drift and enforce exact total conservation
+      (total mass, total momentum, total KE to within tolerance).
+
+Why this is a good hybrid:
+    * More physically constrained than Option I
+    * Easier to optimize than Option II hard greedy integer transfer
+    * Keeps flux interpretation while avoiding many discontinuities during training
+

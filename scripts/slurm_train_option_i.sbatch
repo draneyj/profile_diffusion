@@ -4,7 +4,7 @@
 #SBATCH --error=slurm-%x-%j.err
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --time=24:00:00
 #SBATCH --account=azp
 #SBATCH --mail-type=all
@@ -26,7 +26,7 @@ DATASET_PATH_MANIFEST="${DATASET_PATH_BASE%.pt}_by_xy_manifest.json"
 
 # Training hyperparameters (adjust as needed)
 EPOCHS=100
-BATCH_SIZE=500
+BATCH_SIZE=100
 LR=1e-3
 HIDDEN_CHANNELS=64
 NUM_REFINE_STEPS=4

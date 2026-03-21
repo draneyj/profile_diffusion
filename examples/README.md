@@ -77,3 +77,44 @@ For a ready-to-run helper script, use:
 bash examples/03_infer_random_option_i_smoke.sh
 ```
 
+## 3) Train Option III on the smoke dataset(s)
+
+Helper script:
+
+```bash
+bash examples/04_train_option_iii_smoke.sh
+```
+
+Manual equivalent:
+
+```bash
+python -m diffusion.train \
+  --option iii \
+  --dataset_paths "data/processed/smoke_dataset_nx6_ny6.pt,data/processed/smoke_dataset_nx8_ny8.pt" \
+  --shape_balance_mode proportional \
+  --epochs 3 \
+  --batch_size 2 \
+  --learning_rate 1e-3 \
+  --hidden_channels 32 \
+  --val_fraction 0.1 \
+  --save_every_n_epochs 1
+```
+
+## 4) Inference: random rollout with Option III
+
+Helper script:
+
+```bash
+bash examples/05_infer_random_option_iii_smoke.sh
+```
+
+Manual equivalent:
+
+```bash
+python -m diffusion.infer_random \
+  --option iii \
+  --dataset_path data/processed/smoke_dataset_nx6_ny6.pt \
+  --checkpoint data/processed/checkpoint_optioniii_epoch3.pt \
+  --num_steps 20
+```
+

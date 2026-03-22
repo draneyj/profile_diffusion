@@ -49,6 +49,22 @@ def _compute_grid_dim(extent: float, a: float) -> int:
     return n
 
 
+def _normalize_momentum_numpy_unit(momentum: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    """
+    (3, nx, ny, nz) float32 — per cell, unit vector in direction of summed (m*v), else zeros.
+    """
+
+    p0, p1, p2 = momentum[0], momentum[1], momentum[2]
+    mag_sq = p0 * p0 + p1 * p1 + p2 * p2
+    mag = np.sqrt(np.maximum(mag_sq, eps * eps))
+    mask = mag_sq > (eps * eps)
+    out = np.zeros_like(momentum, dtype=np.float32)
+    out[0] = np.where(mask, (p0 / mag).astype(np.float32), np.float32(0.0))
+    out[1] = np.where(mask, (p1 / mag).astype(np.float32), np.float32(0.0))
+    out[2] = np.where(mask, (p2 / mag).astype(np.float32), np.float32(0.0))
+    return out
+
+
 def _wrap_periodic_xy(x: np.ndarray, *, xlo: float, xlen: float) -> np.ndarray:
     # Map x into [xlo, xlo + xlen) using modulo.
     return xlo + np.mod(x - xlo, xlen)
@@ -260,6 +276,9 @@ def _atoms_to_state(
             # Kinetic energy: 0.5 * m * (v^2).
             v2 = vx[mask_s] ** 2 + vy[mask_s] ** 2 + vz[mask_s] ** 2
             np.add.at(ke[0], (xs, ys, zs), 0.5 * m * v2)
+
+    # Store momentum as unit direction (magnitude is not represented here; see KE).
+    momentum = _normalize_momentum_numpy_unit(momentum)
 
     # Order parameter uses absolute coordinates and only a specific LAMMPS atom type.
     order = np.zeros((1, nx, ny, nz), dtype=np.float32)
@@ -638,6 +657,7 @@ def build_dataset(
                 "pad_to_common_nz": bool(pad_to_common_nz),
                 "pad_nz_mode": str(pad_nz_mode),
                 "order_lammps_type": int(order_lammps_type),
+                "momentum": {"representation": "unit_direction", "eps": 1e-8},
             },
         }
 

@@ -8,6 +8,28 @@ import torch
 from .types import CoarseStateTensors, stack_state_features, unstack_state_features
 
 
+def normalize_momentum_direction(momentum: torch.Tensor, *, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Per spatial cell, replace momentum with a unit vector in its direction, or zeros if ||p|| < eps.
+
+    Expected shapes:
+    - (3, nx, ny, nz) unbatched
+    - (B, 3, nx, ny, nz) batched
+
+    Coarse-grained datasets store **momentum as this unit direction** (magnitude lives in KE / counts).
+    """
+
+    if momentum.dim() == 4:
+        mag_sq = (momentum * momentum).sum(dim=0, keepdim=True)
+    elif momentum.dim() == 5:
+        mag_sq = (momentum * momentum).sum(dim=1, keepdim=True)
+    else:
+        raise ValueError(f"normalize_momentum_direction: expected (3,...) or (B,3,...), got {tuple(momentum.shape)}")
+    mag = torch.sqrt(mag_sq.clamp(min=eps * eps))
+    unit = momentum / mag
+    return torch.where(mag_sq > (eps * eps), unit, torch.zeros_like(momentum))
+
+
 @dataclass
 class CoarseState:
     """
@@ -15,7 +37,7 @@ class CoarseState:
 
     Tensor shapes for a single grid:
     - counts:  (S, nx, ny, nz)
-    - momentum: (3, nx, ny, nz)
+    - momentum: (3, nx, ny, nz) — **unit direction** of total cell momentum (or zero if negligible)
     - ke:       (1, nx, ny, nz)
     - order:    (1, nx, ny, nz)
     """

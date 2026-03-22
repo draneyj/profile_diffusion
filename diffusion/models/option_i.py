@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..state import CoarseState
+from ..state import CoarseState, normalize_momentum_direction
 
 
 def _pad_xy_periodic_z_zero(x: torch.Tensor, pad_xy: int = 1, pad_z: int = 1) -> torch.Tensor:
@@ -120,6 +120,7 @@ class OptionIModel(nn.Module):
         # Keep KE non-negative; order is bounded by the cosine combination.
         state.ke = torch.clamp(state.ke, min=0.0)
         state.order = torch.clamp(state.order, min=-1.0, max=1.0)
+        state.momentum = normalize_momentum_direction(state.momentum)
         return state
 
     def predict_next(
@@ -140,21 +141,30 @@ class OptionIModel(nn.Module):
         if cond_features.dim() == 4:
             cond_features = cond_features.unsqueeze(0)
 
+        s = self.num_species
         if target_state is not None:
             x_target = target_state.as_features()
             if x_target.dim() == 4:
                 x_target = x_target.unsqueeze(0)
             noise = torch.randn_like(x_target) * self.noise_std
             x_est = x_target + noise
+            x_est[:, s : s + 3] = normalize_momentum_direction(x_est[:, s : s + 3])
         else:
             # Inference start: use current state as a crude initialization.
             x_est = cond_features.clone()
 
         for _ in range(self.num_refine_steps):
             x_est = self.denoise_step(cond_features, x_est)
+            x_est[:, s : s + 3] = normalize_momentum_direction(x_est[:, s : s + 3])
 
         # Convert features -> state.
         pred = CoarseState.from_features(x_est, num_species=self.num_species)
+        pred = CoarseState(
+            counts=pred.counts,
+            momentum=normalize_momentum_direction(pred.momentum),
+            ke=pred.ke,
+            order=pred.order,
+        )
 
         if not self.training:
             pred = self._postprocess_eval(pred)

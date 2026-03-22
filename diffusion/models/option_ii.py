@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..state import CoarseState
+from ..state import CoarseState, normalize_momentum_direction
 
 
 FACE_PLUS_X = 0
@@ -522,6 +522,8 @@ class OptionIIModel(nn.Module):
         counts_next = torch.clamp(counts_next, min=0.0)
         ke_next = torch.clamp(ke_next, min=0.0)
 
+        momentum_next = normalize_momentum_direction(momentum_next)
+
         order_next = self._predict_order_next(CoarseState(counts=counts_next, momentum=momentum_next, ke=ke_next, order=order))
         order_next = torch.clamp(order_next, min=-1.0, max=1.0)
 
@@ -629,6 +631,8 @@ class OptionIIModel(nn.Module):
 
         counts_next = torch.clamp(counts_next, min=0.0)
         ke_next = torch.clamp(ke_next, min=0.0)
+
+        momentum_next = normalize_momentum_direction(momentum_next)
 
         order_next = self._predict_order_next(CoarseState(counts=counts_next, momentum=momentum_next, ke=ke_next, order=order))
         order_next = torch.clamp(order_next, min=-1.0, max=1.0)

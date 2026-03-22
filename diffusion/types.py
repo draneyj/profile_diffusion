@@ -16,7 +16,7 @@ class CoarseStateTensors:
 
     Shapes (for a single simulation/grid):
     - counts:  (S, nx, ny, nz)           float32 or int-like
-    - momentum: (3, nx, ny, nz)
+    - momentum: (3, nx, ny, nz) unit direction of cell momentum (or zero)
     - ke:       (1, nx, ny, nz)
     - order:    (1, nx, ny, nz)
     """

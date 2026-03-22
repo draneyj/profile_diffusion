@@ -102,10 +102,11 @@ python -m diffusion.train \
 
 ## 4) Inference: random rollout with Option III
 
-Helper script:
+Helper script (default checkpoint `data/processed/checkpoint_optioniii_epoch100.pt`; override with `CKPT=...`):
 
 ```bash
 bash examples/05_infer_random_option_iii_smoke.sh
+# or: CKPT=data/processed/checkpoint_optioniii_epoch3.pt bash examples/05_infer_random_option_iii_smoke.sh
 ```
 
 Manual equivalent:
@@ -114,7 +115,10 @@ Manual equivalent:
 python -m diffusion.infer_random \
   --option iii \
   --dataset_path data/processed/smoke_dataset_nx6_ny6.pt \
-  --checkpoint data/processed/checkpoint_optioniii_epoch3.pt \
-  --num_steps 20
+  --checkpoint data/processed/checkpoint_optioniii_epoch100.pt \
+  --num_steps 20 \
+  --sample_seed 0
 ```
+
+Starts from a **random frame** in the dataset (`inputs` by default); use `--start_from targets` to sample from targets instead.
 

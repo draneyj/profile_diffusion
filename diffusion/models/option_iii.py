@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..state import CoarseState
+from ..state import CoarseState, normalize_momentum_direction
 from .option_ii import (
     FACE_MINUS_X,
     FACE_MINUS_Y,
@@ -115,7 +115,7 @@ class OptionIIIModel(nn.Module):
         ke_out_total = ke[:, 0] * ke_out_frac[:, 0]  # (B,nx,ny,nz)
         ke_out_face = ke_out_total.unsqueeze(1) * ke_face_prob  # (B,6,nx,ny,nz)
 
-        # Signed momentum face flux, scaled by local momentum magnitude.
+        # Signed momentum face flux, scaled by local "direction strength" (≈1 when momentum is a unit vector).
         p_mag = torch.sqrt(torch.sum(momentum * momentum, dim=1, keepdim=True) + self.eps)  # (B,1,nx,ny,nz)
         mom_scale = self.momentum_scale * p_mag.unsqueeze(1)  # (B,1,1,nx,ny,nz)
         mom_face = torch.tanh(mom_face_raw) * mom_scale
@@ -207,6 +207,7 @@ class OptionIIIModel(nn.Module):
         counts_next = torch.clamp(counts - atom_out_sum + atom_in, min=0.0)
         ke_next = torch.clamp(ke - ke_out_sum + ke_in, min=0.0)
         momentum_next = momentum - mom_out_sum + mom_in
+        momentum_next = normalize_momentum_direction(momentum_next)
 
         # Predict order delta from next-state features.
         next_tmp = CoarseState(counts=counts_next, momentum=momentum_next, ke=ke_next, order=order)

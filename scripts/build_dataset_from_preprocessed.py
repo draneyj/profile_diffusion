@@ -14,7 +14,7 @@ import sys
 
 sys.path.insert(0, str(ROOT_DIR))
 
-from diffusion.state import CoarseState
+from diffusion.state import CoarseState, normalize_momentum_direction
 from diffusion.types import stack_state_features
 
 
@@ -71,13 +71,13 @@ def main() -> None:
 
             in_state = CoarseState(
                 counts=in_payload["counts"],
-                momentum=in_payload["momentum"],
+                momentum=normalize_momentum_direction(in_payload["momentum"]),
                 ke=in_payload["ke"],
                 order=in_payload["order"],
             )
             tgt_state = CoarseState(
                 counts=tgt_payload["counts"],
-                momentum=tgt_payload["momentum"],
+                momentum=normalize_momentum_direction(tgt_payload["momentum"]),
                 ke=tgt_payload["ke"],
                 order=tgt_payload["order"],
             )
@@ -104,6 +104,7 @@ def main() -> None:
             "stride_k": args.stride_k,
             "num_pairs": inputs_t.shape[0],
             "num_species": num_species,
+            "momentum": {"representation": "unit_direction", "eps": 1e-8},
         },
     }
 

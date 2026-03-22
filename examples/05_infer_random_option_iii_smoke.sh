@@ -21,13 +21,15 @@ else
   DATASET_PATH="$BASE_DATASET"
 fi
 
-CKPT="data/processed/checkpoint_optioniii_epoch3.pt"
+# Override: CKPT=/path/to/checkpoint.pt ./05_infer_random_option_iii_smoke.sh
+CKPT="${CKPT:-data/processed/checkpoint_optioniii_epoch100.pt}"
 
 python -m diffusion.infer_random \
   --option iii \
   --dataset_path "$DATASET_PATH" \
   --checkpoint "$CKPT" \
   --num_steps 20 \
+  --sample_seed 0 \
   --device cpu
 
 echo "Rollout written under data/processed/*.npz"

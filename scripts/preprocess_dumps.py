@@ -97,6 +97,7 @@ def main() -> None:
         "a": args.a,
         "species": asdict(species),
         "grid": asdict(grid),
+        "momentum": {"representation": "unit_direction", "eps": 1e-8},
         "frames": [],
     }
 

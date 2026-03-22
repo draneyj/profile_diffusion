@@ -74,7 +74,8 @@ def compute_state_loss(
     elif loss_balance == "rms":
         # Floors avoid blowing up scale when a channel is near-zero everywhere.
         lc = _scaled_mse(pred.counts, target.counts, mask, rms_floor=1.0)
-        lm = _scaled_mse(pred.momentum, target.momentum, mask, rms_floor=1.0)
+        # Momentum channels are unit directions (or zero); typical RMS ≤ 1.
+        lm = _scaled_mse(pred.momentum, target.momentum, mask, rms_floor=0.25)
         lk = _scaled_mse(pred.ke, target.ke, mask, rms_floor=1e-3)
         lo = _scaled_mse(pred.order, target.order, mask, rms_floor=0.25)
     else:

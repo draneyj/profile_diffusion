@@ -14,11 +14,11 @@ There are currently two ideas for how the model operates.
 OPTION I:
 For each cell, the cell takes in the current and surrounding cell data:
     * Number of each atom type
-    * total momentum
+    * momentum **direction** as a **unit vector** (per cell sum of m*v, then normalized; zero if ||sum||≈0). Magnitude is not stored here — use KE.
     * total KE (kinetic energy)
     * order parameter
 as well as a noisy version of the next timestep's cell data, then a series of models REFINE
-the noisy data into the actual next cell state (rounding for the number of atoms). This is a CNN diffusion model.
+the noisy data into the actual next cell state (rounding for the number of atoms). Momentum channels are kept as **unit vectors** after noise and each refine step. This is a CNN diffusion model.
 Benefits: 
     * Can change the size of CNN network to allow for larger timesteps, more info, etc.
     * Diffusion nature accounts for the randomness of the simulation
@@ -30,7 +30,7 @@ Drawbacks:
 OPTION II:
 For each cells face, the simulation takes in
     * Number of each atom type
-    * total momentum (rotated relative to face)
+    * momentum **unit direction** (rotated relative to face), same representation as coarse state features
     * total KE (kinetic energy)
 of the two cells that share that face. Then it predicts
     * a FORCE momentum flux: This momentum is transferred without moving atoms
@@ -55,6 +55,8 @@ Transfer MATERIAL fluxes OUT of cells they are leaving
 Transfer FORCE fluxes OUT of cells they are leaving
 Transfer ALL fluxes IN cells they're headed to
 
+After the update, **cell momentum is renormalized to a unit vector** (or zero if negligible) so features stay consistent with the dataset representation.
+
 Benefits:
     * conservation laws obeyed
     * fewer cells being taken in as data means smaller networks
@@ -75,7 +77,7 @@ OPTION III: Hybrid approach.
 
 For each cell, the cell takes in the current and 26 surrounding cell data:
     * Number of each atom type
-    * total momentum (3-vector)
+    * momentum **unit direction** (3-vector, ||p||=1 or zero)
     * total KE (kinetic energy)
     * order parameter
 Then it predicts:
@@ -97,7 +99,7 @@ Then it predicts:
 
 Then apply fluxes to get next state:
     1) Compute outgoing and incoming fluxes per face.
-    2) Update counts, momentum, KE with soft (float) transfers during training.
+    2) Update counts, momentum, KE with soft (float) transfers during training; **renormalize cell momentum to a unit vector** (or zero) after the update.
     3) Apply a projection/correction step to enforce conservation/validity constraints.
     4) In inference, optionally apply hard/integer atom transfer after soft prediction.
 
@@ -117,4 +119,8 @@ Training (diffusion/train.py):
     * Optional flux regularization: --flux_reg_weight > 0 adds a mean-squared penalty on constrained/projected
       face fluxes (Option II: after per-cell scale; Option III: after alpha projection) to prefer smaller transfers
       and calmer rollouts. Option I passes a zero flux term for a uniform API.
+
+Data migration:
+    * Regenerate `dataset.pt` / preprocessed frames after this change. Old checkpoints trained on raw-momentum features
+      are not compatible with the new representation without retraining.
 

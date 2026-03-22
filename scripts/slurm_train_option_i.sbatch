@@ -34,6 +34,8 @@ NOISE_STD=0.25
 
 VAL_FRACTION=0.1
 SAVE_EVERY_N_EPOCHS=5
+# Optional: CHECKPOINT_STEM=my_run sbatch ...  (diffusion.train --checkpoint_stem)
+CHECKPOINT_STEM="${CHECKPOINT_STEM:-}"
 
 echo "Running on host: $(hostname)"
 echo "Repo dir: ${REPO_DIR}"
@@ -76,6 +78,9 @@ CMD=(python -u -m diffusion.train
   --learning_curve_path data/processed/learning_curve_optioni.csv
   --device cuda
 )
+if [[ -n "$CHECKPOINT_STEM" ]]; then
+  CMD+=(--checkpoint_stem "$CHECKPOINT_STEM")
+fi
 
 echo "Command:"
 printf '%q ' "${CMD[@]}"

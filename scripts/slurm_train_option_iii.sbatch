@@ -30,6 +30,8 @@ BATCH_SIZE=100
 LR=1e-3
 HIDDEN_CHANNELS=64
 FLUX_REG_WEIGHT=1e-4   # mean-sq flux penalty on projected face fluxes (see diffusion.train --flux_reg_weight)
+# Optional distinct checkpoint names: export CHECKPOINT_STEM=my_run before sbatch (see diffusion.train --checkpoint_stem)
+CHECKPOINT_STEM="${CHECKPOINT_STEM:-}"
 
 VAL_FRACTION=0.1
 SAVE_EVERY_N_EPOCHS=5
@@ -73,6 +75,9 @@ CMD=(python -u -m diffusion.train
   --flux_reg_weight "$FLUX_REG_WEIGHT"
   --device cuda
 )
+if [[ -n "$CHECKPOINT_STEM" ]]; then
+  CMD+=(--checkpoint_stem "$CHECKPOINT_STEM")
+fi
 
 echo "Command:"
 printf '%q ' "${CMD[@]}"

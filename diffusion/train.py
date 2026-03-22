@@ -4,6 +4,7 @@ import argparse
 import csv
 import os
 import math
+from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
@@ -158,6 +159,13 @@ def main() -> None:
         default=5,
         help="Save checkpoints only every N epochs (final epoch is always saved).",
     )
+    parser.add_argument(
+        "--checkpoint_stem",
+        type=str,
+        default=None,
+        help="Filename stem for saved checkpoints (default: checkpoint_option<opt>). "
+        "Files are written as <output_dir>/{stem}_epoch{N}.pt. Only the base name is used (no directories).",
+    )
     parser.add_argument("--split_seed", type=int, default=None, help="Seed for train/val split (defaults to --seed).")
     parser.add_argument(
         "--learning_curve_path",
@@ -181,6 +189,15 @@ def main() -> None:
         loss_balance: str = "rms" if args.option in ("ii", "iii") else "none"
     else:
         loss_balance = str(args.loss_balance)
+
+    if args.checkpoint_stem is None:
+        checkpoint_stem = f"checkpoint_option{args.option}"
+    else:
+        checkpoint_stem = Path(str(args.checkpoint_stem).strip()).name
+        if not checkpoint_stem or checkpoint_stem in (".", ".."):
+            raise ValueError(
+                "--checkpoint_stem must be a non-empty base name (directories are ignored; set paths via --output_dir)."
+            )
 
     seed_all(args.seed)
     device_cfg = parse_device(args)
@@ -456,7 +473,7 @@ def main() -> None:
         save_every = int(args.save_every_n_epochs)
         should_save = (save_every <= 1) or (epoch % save_every == 0) or (epoch == args.epochs)
         if should_save:
-            ckpt_path = os.path.join(out_dir, f"checkpoint_option{args.option}_epoch{epoch}.pt")
+            ckpt_path = os.path.join(out_dir, f"{checkpoint_stem}_epoch{epoch}.pt")
             torch.save(
                 {
                     "epoch": epoch,
@@ -470,6 +487,7 @@ def main() -> None:
                     "soft_transfer": bool(args.soft_transfer or (not args.hard_eval)),
                     "loss_balance": loss_balance,
                     "flux_reg_weight": flux_reg_w,
+                    "checkpoint_stem": checkpoint_stem,
                 },
                 ckpt_path,
             )

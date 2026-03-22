@@ -30,6 +30,8 @@ BATCH_SIZE=100
 LR=1e-3
 HIDDEN_CHANNELS=64
 FLUX_REG_WEIGHT=1e-4   # mean-sq flux penalty on constrained face fluxes (see diffusion.train --flux_reg_weight)
+# Optional: CHECKPOINT_STEM=my_run sbatch ...  (diffusion.train --checkpoint_stem)
+CHECKPOINT_STEM="${CHECKPOINT_STEM:-}"
 SOFT_TRANSFER=1   # 1: use differentiable soft transfer in training, 0: force hard_eval
 
 VAL_FRACTION=0.1
@@ -79,6 +81,9 @@ if [[ "$SOFT_TRANSFER" -eq 1 ]]; then
   CMD+=(--soft_transfer)
 else
   CMD+=(--hard_eval)
+fi
+if [[ -n "$CHECKPOINT_STEM" ]]; then
+  CMD+=(--checkpoint_stem "$CHECKPOINT_STEM")
 fi
 
 echo "Command:"

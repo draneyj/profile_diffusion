@@ -116,6 +116,7 @@ Why this is a good hybrid:
     * Keeps flux interpretation while avoiding many discontinuities during training
 
 Training (diffusion/train.py):
+    * Optional checkpoint naming: --checkpoint_stem MYNAME saves MYNAME_epoch{N}.pt (default stem checkpoint_option<i|ii|iii>).
     * Optional flux regularization: --flux_reg_weight > 0 adds a mean-squared penalty on constrained/projected
       face fluxes (Option II: after per-cell scale; Option III: after alpha projection) to prefer smaller transfers
       and calmer rollouts. Option I passes a zero flux term for a uniform API.

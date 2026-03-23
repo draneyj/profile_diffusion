@@ -26,7 +26,7 @@ Decisions made (implementation-specific)
 6. Training datapoint pairing: `make_data.py` creates (input, target) pairs as frame t -> frame t + stride_k (configurable `--stride_k`),
    using numeric dump filenames (`data/dumps/<number>.dump`) for ordering.
 7. Option I: implemented as a diffusion-style iterative refinement CNN that uses a full 3x3x3 neighborhood (via 3D conv with circular padding in x/y and zero padding in z).
-8. Option II: implemented with a face-flux predictor and constrained transfer engine.
+8. Option II: implemented with a 26-neighborhood (Moore) direction-flux predictor and constrained transfer engine.
    - Hard integer transfers are used in `eval()`; soft differentiable transfers are used during training when enabled.
    - Outgoing fluxes are scaled per source cell to avoid negative atom counts or negative kinetic energy.
    - Because the order parameter is not directly determined from fluxes alone (no explicit atom positions are tracked),

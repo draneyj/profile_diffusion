@@ -28,16 +28,18 @@ Drawbacks:
 =================================================================================================================
 
 OPTION II:
-For each cells face, the simulation takes in
+For each cell, the simulation takes in
     * Number of each atom type
-    * momentum **unit direction** (rotated relative to face), same representation as coarse state features
+    * momentum **unit direction** (rotated into a direction-aligned local frame per neighbor offset)
     * total KE (kinetic energy)
-of the two cells that share that face. Then it predicts
+from the source cell and each of its 26 neighbor offsets in the Moore neighborhood (3x3x3 excluding the center).
+Then it predicts
     * a FORCE momentum flux: This momentum is transferred without moving atoms
     * a FORCE KE flux: this KE is transferred without moving atoms
     * a MATERIAL momentum flux: the momentum transferred with atoms
     * a MATERIAL KE flux: the KE transferred with atoms
-    * the atom flux for each species. If zero, the above material fluxes are ignored (set to 0).
+    * the atom flux for each species (to that neighbor offset). If an atom flux to a given offset is ~0,
+      the above material fluxes are ignored (set to 0).
         - this will be predicted as a float but enacted in whole numbers.
 The simulation then transferrs as much of each of these four fluxes as it can OUT of the respective cells.
 This starts with the material fluxes, then the force fluxes. If at any point the fluxes would create negative KE
@@ -63,7 +65,7 @@ Benefits:
     * doesn't require multiple networks like a diffusion model
 Drawbacks:
     * Not random despite the data being random
-    * There are 3x as many fluxes as there are cells, so the model must run 3N times rather than N as in the CNN
+    * There are many more flux outputs per source cell (one per neighbor offset), so inference/training is slower than the CNN
     * Overall this implementation is more complex.
     * Loss function is a penalty of the *result* of the predicted fluxes, which have many conditionals and rounding issues, which
         makes things harder for the NN to learn. We don't know the fluxes based on the data, only what changes they produce.
@@ -84,21 +86,21 @@ Then it predicts:
     * Constrained latent variables (not direct unconstrained fluxes):
         * For each species s:
             - one scalar z_out_s -> f_out_s = sigmoid(z_out_s) in [0,1]
-            - six face logits z_face_s[6] -> p_face_s = softmax(z_face_s), sum_f p_face_s[f] = 1
-            - outgoing atom flux on each face: out_s[f] = N_s * f_out_s * p_face_s[f]
+            - 26 direction logits z_dir_s[D=26] -> p_dir_s = softmax(z_dir_s), sum_d p_dir_s[d] = 1
+            - outgoing atom flux on each neighbor offset: out_s[d] = N_s * f_out_s * p_dir_s[d]
         * For kinetic energy:
             - one scalar z_out_ke -> f_out_ke = sigmoid(z_out_ke) in [0,1]
-            - six face logits z_face_ke[6] -> p_face_ke = softmax(z_face_ke)
-            - outgoing KE flux on each face: out_ke[f] = KE * f_out_ke * p_face_ke[f]
+            - 26 direction logits z_dir_ke[D=26] -> p_dir_ke = softmax(z_dir_ke)
+            - outgoing KE flux on each neighbor offset: out_ke[d] = KE * f_out_ke * p_dir_ke[d]
         * For momentum:
-            - direct signed face fluxes per component (can be negative), optionally bounded with tanh scaling.
+            - direct signed direction fluxes per component (can be negative), optionally bounded with tanh scaling.
     * This guarantees by construction:
         * Nonnegative atom/KE fluxes
         * Sum of outgoing atom/KE fluxes cannot exceed what is available in the source cell
         * Stable differentiable training (no integer rounding in the forward pass)
 
 Then apply fluxes to get next state:
-    1) Compute outgoing and incoming fluxes per face.
+    1) Compute outgoing and incoming fluxes per neighbor offset.
     2) Update counts, momentum, KE with soft (float) transfers during training; **renormalize cell momentum to a unit vector** (or zero) after the update.
     3) Apply a projection/correction step to enforce conservation/validity constraints.
     4) In inference, optionally apply hard/integer atom transfer after soft prediction.
@@ -118,7 +120,7 @@ Why this is a good hybrid:
 Training (diffusion/train.py):
     * Optional checkpoint naming: --checkpoint_stem MYNAME saves MYNAME_epoch{N}.pt (default stem checkpoint_option<i|ii|iii>).
     * Optional flux regularization: --flux_reg_weight > 0 adds a mean-squared penalty on constrained/projected
-      face fluxes (Option II: after per-cell scale; Option III: after alpha projection) to prefer smaller transfers
+      neighbor-direction fluxes (Option II: after per-cell scale; Option III: after alpha projection) to prefer smaller transfers
       and calmer rollouts. Option I passes a zero flux term for a uniform API.
 
 Data migration:

@@ -7,15 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..state import CoarseState, normalize_momentum_direction
-from .option_ii import (
-    FACE_MINUS_X,
-    FACE_MINUS_Y,
-    FACE_MINUS_Z,
-    FACE_PLUS_X,
-    FACE_PLUS_Y,
-    FACE_PLUS_Z,
-    shift_src_to_dst,
-)
+from .option_ii import DIRECTIONS_26, build_direction_bases_26, shift_src_to_dst_offset
 
 
 class OptionIIIModel(nn.Module):
@@ -24,10 +16,10 @@ class OptionIIIModel(nn.Module):
 
     Constrained parameterization:
     - Species outflow fraction per cell: sigmoid -> [0,1]
-    - Face split per species: softmax over 6 faces
+    - Direction split per species: softmax over 26 neighbor directions
     - KE outflow fraction per cell: sigmoid -> [0,1]
-    - KE face split: softmax over 6 faces
-    - Momentum face fluxes: signed (tanh-bounded)
+    - Direction split for KE: softmax over 26 neighbor directions
+    - Momentum direction fluxes: signed (tanh-bounded), in direction-aligned local coordinates then rotated to global
 
     Projection/correction:
     - Per-cell scaling alpha in [0,1] to prevent negative species counts and KE.
@@ -52,9 +44,17 @@ class OptionIIIModel(nn.Module):
 
         self.num_features = self.num_species + 3 + 1 + 1
 
+        self.num_dirs = len(DIRECTIONS_26)
+        global_from_local_26, _ = build_direction_bases_26(
+            DIRECTIONS_26,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        self.register_buffer("_global_from_local_26", global_from_local_26)
+
         # Head layout:
-        # [atom_out_frac(S), atom_face_logits(6*S), ke_out_frac(1), ke_face_logits(6), mom_face_raw(6*3)]
-        out_ch = self.num_species + (6 * self.num_species) + 1 + 6 + 18
+        # [atom_out_frac(S), atom_dir_logits(D*S), ke_out_frac(1), ke_dir_logits(D), mom_dir_raw(D*3)]
+        out_ch = self.num_species + (self.num_dirs * self.num_species) + 1 + self.num_dirs + (self.num_dirs * 3)
         self.head = nn.Sequential(
             nn.Conv3d(self.num_features, hidden_channels, kernel_size=1),
             nn.SiLU(),
@@ -71,9 +71,9 @@ class OptionIIIModel(nn.Module):
     def _predict_raw_fluxes(self, state: CoarseState) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
-        - atom_out_face: (B,6,S,nx,ny,nz), nonnegative
-        - ke_out_face:   (B,6,nx,ny,nz), nonnegative
-        - mom_face:      (B,6,3,nx,ny,nz), signed
+        - atom_out_face: (B,D,S,nx,ny,nz), nonnegative
+        - ke_out_face:   (B,D,nx,ny,nz), nonnegative
+        - mom_face:      (B,D,3,nx,ny,nz), signed (global coordinates)
         """
         counts = state.counts
         momentum = state.momentum
@@ -95,30 +95,31 @@ class OptionIIIModel(nn.Module):
         atom_out_frac = torch.sigmoid(y[:, idx : idx + s])  # (B,S,nx,ny,nz)
         idx += s
 
-        atom_face_logits = y[:, idx : idx + 6 * s].reshape(-1, 6, s, *y.shape[-3:])
-        idx += 6 * s
-        atom_face_prob = torch.softmax(atom_face_logits, dim=1)  # (B,6,S,nx,ny,nz)
+        atom_dir_logits = y[:, idx : idx + self.num_dirs * s].reshape(-1, self.num_dirs, s, *y.shape[-3:])
+        idx += self.num_dirs * s
+        atom_face_prob = torch.softmax(atom_dir_logits, dim=1)  # (B,D,S,nx,ny,nz)
 
         ke_out_frac = torch.sigmoid(y[:, idx : idx + 1])  # (B,1,nx,ny,nz)
         idx += 1
 
-        ke_face_logits = y[:, idx : idx + 6].reshape(-1, 6, *y.shape[-3:])
-        idx += 6
-        ke_face_prob = torch.softmax(ke_face_logits, dim=1)  # (B,6,nx,ny,nz)
+        ke_dir_logits = y[:, idx : idx + self.num_dirs].reshape(-1, self.num_dirs, *y.shape[-3:])
+        idx += self.num_dirs
+        ke_face_prob = torch.softmax(ke_dir_logits, dim=1)  # (B,D,nx,ny,nz)
 
-        mom_face_raw = y[:, idx : idx + 18].reshape(-1, 6, 3, *y.shape[-3:])
+        mom_dir_local = y[:, idx : idx + (self.num_dirs * 3)].reshape(-1, self.num_dirs, 3, *y.shape[-3:])
 
         # Total out per species and KE.
         atom_out_total = counts * atom_out_frac  # (B,S,nx,ny,nz)
-        atom_out_face = atom_out_total.unsqueeze(1) * atom_face_prob  # (B,6,S,nx,ny,nz)
+        atom_out_face = atom_out_total.unsqueeze(1) * atom_face_prob  # (B,D,S,nx,ny,nz)
 
         ke_out_total = ke[:, 0] * ke_out_frac[:, 0]  # (B,nx,ny,nz)
-        ke_out_face = ke_out_total.unsqueeze(1) * ke_face_prob  # (B,6,nx,ny,nz)
+        ke_out_face = ke_out_total.unsqueeze(1) * ke_face_prob  # (B,D,nx,ny,nz)
 
-        # Signed momentum face flux, scaled by local "direction strength" (≈1 when momentum is a unit vector).
+        # Signed momentum local-frame flux, scaled by local "direction strength".
         p_mag = torch.sqrt(torch.sum(momentum * momentum, dim=1, keepdim=True) + self.eps)  # (B,1,nx,ny,nz)
         mom_scale = self.momentum_scale * p_mag.unsqueeze(1)  # (B,1,1,nx,ny,nz)
-        mom_face = torch.tanh(mom_face_raw) * mom_scale
+        mom_face_local = torch.tanh(mom_dir_local) * mom_scale  # (B,D,3,nx,ny,nz) local coords
+        mom_face = torch.einsum("dij,bdjxyz->bdixyz", self._global_from_local_26, mom_face_local)  # global coords
 
         return atom_out_face, ke_out_face, mom_face
 
@@ -199,10 +200,10 @@ class OptionIIIModel(nn.Module):
         atom_in = torch.zeros_like(counts)
         ke_in = torch.zeros_like(ke)
         mom_in = torch.zeros_like(momentum)
-        for face in (FACE_PLUS_X, FACE_MINUS_X, FACE_PLUS_Y, FACE_MINUS_Y, FACE_PLUS_Z, FACE_MINUS_Z):
-            atom_in = atom_in + shift_src_to_dst(atom_out_face[:, face], face=face)
-            ke_in = ke_in + shift_src_to_dst(ke_out_face[:, face].unsqueeze(1), face=face)
-            mom_in = mom_in + shift_src_to_dst(mom_face[:, face], face=face)
+        for dir_idx, (dx, dy, dz) in enumerate(DIRECTIONS_26):
+            atom_in = atom_in + shift_src_to_dst_offset(atom_out_face[:, dir_idx], dx=dx, dy=dy, dz=dz)
+            ke_in = ke_in + shift_src_to_dst_offset(ke_out_face[:, dir_idx].unsqueeze(1), dx=dx, dy=dy, dz=dz)
+            mom_in = mom_in + shift_src_to_dst_offset(mom_face[:, dir_idx], dx=dx, dy=dy, dz=dz)
 
         counts_next = torch.clamp(counts - atom_out_sum + atom_in, min=0.0)
         ke_next = torch.clamp(ke - ke_out_sum + ke_in, min=0.0)

@@ -10,7 +10,7 @@ except ModuleNotFoundError as e:
 
 from diffusion.config import GridConfig, SpeciesConfig
 from diffusion.data.make_data import make_coarse_state_from_dump
-from diffusion.models.option_ii import OptionIIModel, FACE_PLUS_X
+from diffusion.models.option_ii import OptionIIModel, DIRECTIONS_26
 from diffusion.state import CoarseState
 
 
@@ -121,17 +121,19 @@ class TestOptionIIHardTransfer(unittest.TestCase):
         state = CoarseState(counts=counts, momentum=momentum, ke=ke, order=order)
 
         # Predicted fluxes: send too much atoms/energy out of +x neighbors.
-        # Face order in OptionIIModel: [+x,-x,+y,-y,+z,-z]
-        atom_flux = torch.zeros((B, 6, S, nx, ny, nz), dtype=torch.float32)
-        force_ke_flux = torch.zeros((B, 6, nx, ny, nz), dtype=torch.float32)
-        material_momentum_flux = torch.zeros((B, 6, S, 3, nx, ny, nz), dtype=torch.float32)
-        material_ke_flux = torch.zeros((B, 6, S, nx, ny, nz), dtype=torch.float32)
-        force_momentum_flux = torch.zeros((B, 6, 3, nx, ny, nz), dtype=torch.float32)
+        D = len(DIRECTIONS_26)
+        idx_plus_x = DIRECTIONS_26.index((1, 0, 0))
+
+        atom_flux = torch.zeros((B, D, S, nx, ny, nz), dtype=torch.float32)
+        force_ke_flux = torch.zeros((B, D, nx, ny, nz), dtype=torch.float32)
+        material_momentum_flux = torch.zeros((B, D, S, 3, nx, ny, nz), dtype=torch.float32)
+        material_ke_flux = torch.zeros((B, D, S, nx, ny, nz), dtype=torch.float32)
+        force_momentum_flux = torch.zeros((B, D, 3, nx, ny, nz), dtype=torch.float32)
 
         # For both cells, predict 2 atoms out on +x face (will be scaled down because counts are 1.0).
-        atom_flux[:, FACE_PLUS_X, 0, :, 0, 0] = 2.0
+        atom_flux[:, idx_plus_x, 0, :, 0, 0] = 2.0
         # Predict KE flux out larger than available ke (=1.0) to force KE scaling.
-        force_ke_flux[:, FACE_PLUS_X, :, 0, 0] = 2.0
+        force_ke_flux[:, idx_plus_x, :, 0, 0] = 2.0
 
         fluxes = {
             "atom_flux": atom_flux,

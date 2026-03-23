@@ -153,6 +153,106 @@ def shift_src_to_dst(t: torch.Tensor, *, face: int) -> torch.Tensor:
     raise ValueError(f"Unknown face {face}")
 
 
+# 26-neighborhood (Moore) offsets excluding (0,0,0).
+# Ordering is fixed so the model learns a consistent direction index mapping.
+DIRECTIONS_26: Tuple[Tuple[int, int, int], ...] = tuple(
+    (dx, dy, dz)
+    for dx in (-1, 0, 1)
+    for dy in (-1, 0, 1)
+    for dz in (-1, 0, 1)
+    if not (dx == 0 and dy == 0 and dz == 0)
+)
+
+
+def shift_src_to_dst_offset(t: torch.Tensor, *, dx: int, dy: int, dz: int) -> torch.Tensor:
+    """
+    Shift a (B,*,nx,ny,nz) tensor from source cell coordinates to destination
+    coordinates for an offset (dx,dy,dz).
+
+    x and y are periodic; z is non-periodic. Off-grid in z is dropped (zeros).
+    """
+    if t.dim() < 4:
+        raise ValueError("Expected tensor with at least 4 dims (B,...,nx,ny,nz)")
+
+    nx_dim = -3
+    ny_dim = -2
+    nz_dim = -1
+
+    out = t
+    if dx != 0:
+        out = torch.roll(out, shifts=dx, dims=nx_dim)
+    if dy != 0:
+        out = torch.roll(out, shifts=dy, dims=ny_dim)
+
+    # z: no wrap
+    if dz == 0:
+        return out
+
+    out_z = torch.zeros_like(out)
+    if dz > 0:
+        out_z[..., dz:] = out[..., :-dz]
+    else:
+        s = -dz
+        out_z[..., :-s] = out[..., s:]
+    return out_z
+
+
+def gather_dst_aligned_offset(t: torch.Tensor, *, dx: int, dy: int, dz: int) -> torch.Tensor:
+    """
+    Gather destination-cell values for offset (dx,dy,dz), aligned to source coordinates.
+
+    Returns tensor `out` such that `out[..., i, j, k] = t[..., i+dx, j+dy, k+dz]`
+    with x/y periodic and z zero-padded when out of range.
+    """
+    # Align destination to source by shifting the *source* tensor by the negative offset.
+    return shift_src_to_dst_offset(t, dx=-dx, dy=-dy, dz=-dz)
+
+
+def build_direction_bases_26(
+    directions: Tuple[Tuple[int, int, int], ...] = DIRECTIONS_26,
+    *,
+    eps: float = 1e-8,
+    dtype: torch.dtype = torch.float32,
+    device: Optional[torch.device] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Returns:
+    - global_from_local: (D,3,3) where global_vec = global_from_local @ local_vec
+    - local_from_global: (D,3,3) where local_vec  = local_from_global @ global_vec
+
+    The local basis uses:
+    - local axis 0 aligned with the direction vector
+    - local axis 1/2 spanning the tangent plane.
+    """
+    if device is None:
+        device = torch.device("cpu")
+    d = len(directions)
+    global_from_local = torch.zeros((d, 3, 3), dtype=dtype, device=device)
+    local_from_global = torch.zeros((d, 3, 3), dtype=dtype, device=device)
+
+    for i, (dx, dy, dz) in enumerate(directions):
+        v = torch.tensor([dx, dy, dz], dtype=dtype, device=device)
+        v_norm = torch.sqrt(torch.clamp((v * v).sum(), min=eps))
+        n = v / v_norm
+
+        # Pick a reference vector not parallel to n.
+        ref = torch.tensor([1.0, 0.0, 0.0], dtype=dtype, device=device)
+        if torch.abs(n[0]) > 0.9:
+            ref = torch.tensor([0.0, 1.0, 0.0], dtype=dtype, device=device)
+
+        t1 = torch.cross(n, ref)
+        t1_norm = torch.sqrt(torch.clamp((t1 * t1).sum(), min=eps))
+        t1 = t1 / t1_norm
+        t2 = torch.cross(n, t1)
+
+        # Columns: [n, t1, t2]
+        B = torch.stack([n, t1, t2], dim=1)  # (3,3)
+        global_from_local[i] = B
+        local_from_global[i] = B.transpose(0, 1)
+
+    return global_from_local, local_from_global
+
+
 def shift_dst_to_src(t: torch.Tensor, *, face: int) -> torch.Tensor:
     """
     Inverse shift (destination view -> source aligned tensor) for gathering neighbor features.
@@ -182,7 +282,7 @@ class OptionIIModel(nn.Module):
         num_species: int,
         hidden_channels: int = 64,
         soft_transfer: bool = True,
-        num_faces: int = 6,
+        num_faces: int = len(DIRECTIONS_26),
         eps: float = 1e-8,
     ):
         super().__init__()
@@ -191,6 +291,21 @@ class OptionIIModel(nn.Module):
         self.soft_transfer = bool(soft_transfer)
         self.num_faces = int(num_faces)
         self.eps = float(eps)
+        if self.num_faces != len(DIRECTIONS_26):
+            raise ValueError(
+                f"OptionIIModel currently supports only 26-direction neighborhood; got num_faces={self.num_faces}"
+            )
+
+        # Direction-aligned momentum coordinate frames for the 26 offsets.
+        dirs_tensor = torch.tensor(DIRECTIONS_26, dtype=torch.int64)  # (D,3) with columns (dx,dy,dz)
+        global_from_local, local_from_global = build_direction_bases_26(
+            DIRECTIONS_26,
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        self.register_buffer("_directions_26", dirs_tensor)  # int offsets
+        self.register_buffer("_global_from_local_26", global_from_local)
+        self.register_buffer("_local_from_global_26", local_from_global)
         # If True, `predict_next()` will use soft transfer even when the module is in eval()
         # mode (i.e. self.training == False). This is meant for large-grid inference where the
         # exact integer transfer is too expensive.
@@ -275,17 +390,15 @@ class OptionIIModel(nn.Module):
         if features.dim() == 4:
             features = features.unsqueeze(0)
 
-        # Gather destination features (for counts/ke/order and for momentum rotation too).
-        dst_px, dst_mx, dst_py, dst_my, dst_pz, dst_mz = self._build_face_neighbor_features(features)
-
-        dst_features_by_face = [dst_px, dst_mx, dst_py, dst_my, dst_pz, dst_mz]
-
         # Split src features into components for easier rotation.
         s = self.num_species
         src_counts = features[:, 0:s]
         src_mom = features[:, s : s + 3]  # (B,3,nx,ny,nz)
         src_ke = features[:, s + 3 : s + 4]  # (B,1,nx,ny,nz)
         src_order = features[:, s + 4 : s + 5]  # (B,1,nx,ny,nz)
+
+        # Rotate src momentum into each direction-local frame.
+        src_mom_local_all = torch.einsum("dij,bjxyz->bdixyz", self._local_from_global_26, src_mom)
 
         face_fluxes = {
             "atom_flux": [],
@@ -295,17 +408,17 @@ class OptionIIModel(nn.Module):
             "force_ke_flux": [],
         }
 
-        # Evaluate shared face MLP for each directed face.
-        for face in range(6):
-            dst_feat = dst_features_by_face[face]
+        # Evaluate shared direction MLP for each of the 26 directed neighbor offsets.
+        for dir_idx, (dx, dy, dz) in enumerate(DIRECTIONS_26):
+            dst_feat = gather_dst_aligned_offset(features, dx=dx, dy=dy, dz=dz)
             dst_counts = dst_feat[:, 0:s]
             dst_mom = dst_feat[:, s : s + 3]
             dst_ke = dst_feat[:, s + 3 : s + 4]
             dst_order = dst_feat[:, s + 4 : s + 5]
 
-            # Rotate momentum into face-normal aligned coordinates.
-            src_mom_rot = self._rotate_state_momentum_for_face(src_mom, face)  # (B,3,nx,ny,nz)
-            dst_mom_rot = self._rotate_state_momentum_for_face(dst_mom, face)
+            # Rotate momentum into direction-aligned local coordinates.
+            src_mom_rot = src_mom_local_all[:, dir_idx]  # (B,3,nx,ny,nz)
+            dst_mom_rot = torch.einsum("ij,bjxyz->bixyz", self._local_from_global_26[dir_idx], dst_mom)
 
             # Material momentum flux is predicted per species, but input uses total momentum per cell.
             # We include rotated total momentum for both src and dst.
@@ -355,12 +468,12 @@ class OptionIIModel(nn.Module):
             face_fluxes["force_momentum_flux"].append(force_mom_rot)
             face_fluxes["force_ke_flux"].append(force_ke)
 
-        # Stack across faces.
-        atom_flux = torch.stack(face_fluxes["atom_flux"], dim=1)  # (B,F,S,nx,ny,nz)
-        material_momentum_flux = torch.stack(face_fluxes["material_momentum_flux"], dim=1)  # (B,F,S,3,nx,ny,nz)
-        material_ke_flux = torch.stack(face_fluxes["material_ke_flux"], dim=1)  # (B,F,S,nx,ny,nz)
-        force_momentum_flux = torch.stack(face_fluxes["force_momentum_flux"], dim=1)  # (B,F,3,nx,ny,nz)
-        force_ke_flux = torch.stack(face_fluxes["force_ke_flux"], dim=1)  # (B,F,nx,ny,nz)
+        # Stack across directions.
+        atom_flux = torch.stack(face_fluxes["atom_flux"], dim=1)  # (B,D,S,nx,ny,nz)
+        material_momentum_flux = torch.stack(face_fluxes["material_momentum_flux"], dim=1)  # (B,D,S,3,nx,ny,nz)
+        material_ke_flux = torch.stack(face_fluxes["material_ke_flux"], dim=1)  # (B,D,S,nx,ny,nz)
+        force_momentum_flux = torch.stack(face_fluxes["force_momentum_flux"], dim=1)  # (B,D,3,nx,ny,nz)
+        force_ke_flux = torch.stack(face_fluxes["force_ke_flux"], dim=1)  # (B,D,nx,ny,nz)
 
         return {
             "atom_flux": atom_flux,
@@ -491,28 +604,33 @@ class OptionIIModel(nn.Module):
         in_mom = torch.zeros_like(momentum)
         in_ke = torch.zeros_like(ke)
 
-        for face in range(6):
-            atom_face = atom_flux[:, face]  # (B,S,nx,ny,nz)
-            in_counts = in_counts + shift_src_to_dst(atom_face, face=face)
+        for dir_idx, (dx, dy, dz) in enumerate(DIRECTIONS_26):
+            atom_face = atom_flux[:, dir_idx]  # (B,S,nx,ny,nz)
+            in_counts = in_counts + shift_src_to_dst_offset(atom_face, dx=dx, dy=dy, dz=dz)
 
-            force_mom_face_rot = force_mom_rot[:, face]  # (B,3,nx,ny,nz)
-            force_mom_face_global = rotate_vec_from_face_normal(force_mom_face_rot, face)  # (B,3,nx,ny,nz)
+            # Force momentum: local->global using the direction basis.
+            force_mom_face_rot = force_mom_rot[:, dir_idx]  # (B,3,nx,ny,nz) in local coords
+            force_mom_face_global = torch.einsum(
+                "ij,bjxyz->bixyz", self._global_from_local_26[dir_idx], force_mom_face_rot
+            )  # (B,3,nx,ny,nz)
             out_force_mom_global = out_force_mom_global + force_mom_face_global
-            in_mom = in_mom + shift_src_to_dst(force_mom_face_global, face=face)
+            in_mom = in_mom + shift_src_to_dst_offset(force_mom_face_global, dx=dx, dy=dy, dz=dz)
 
-            material_mom_face_rot = material_mom_rot[:, face]  # (B,S,3,nx,ny,nz)
-            # Convert each vector: rotate expects (B,S,3,...) works.
-            material_mom_face_global = rotate_vec_from_face_normal(material_mom_face_rot, face)  # (B,S,3,...)
+            # Material momentum: sum species after local->global.
+            material_mom_face_rot = material_mom_rot[:, dir_idx]  # (B,S,3,nx,ny,nz) local
+            material_mom_face_global = torch.einsum(
+                "ij,bsjxyz->bsixyz", self._global_from_local_26[dir_idx], material_mom_face_rot
+            )  # (B,S,3,nx,ny,nz) global
             material_mom_total_global = material_mom_face_global.sum(dim=1)  # (B,3,nx,ny,nz)
             out_material_mom_global = out_material_mom_global + material_mom_total_global
-            in_mom = in_mom + shift_src_to_dst(material_mom_total_global, face=face)
+            in_mom = in_mom + shift_src_to_dst_offset(material_mom_total_global, dx=dx, dy=dy, dz=dz)
 
             # KE (scalars)
-            force_ke_face = force_ke[:, face]  # (B,nx,ny,nz)
-            in_ke = in_ke + shift_src_to_dst(force_ke_face.unsqueeze(1), face=face)
+            force_ke_face = force_ke[:, dir_idx]  # (B,nx,ny,nz)
+            in_ke = in_ke + shift_src_to_dst_offset(force_ke_face.unsqueeze(1), dx=dx, dy=dy, dz=dz)
 
-            material_ke_face = material_ke[:, face].sum(dim=1)  # (B,nx,ny,nz)
-            in_ke = in_ke + shift_src_to_dst(material_ke_face.unsqueeze(1), face=face)
+            material_ke_face = material_ke[:, dir_idx].sum(dim=1)  # (B,nx,ny,nz)
+            in_ke = in_ke + shift_src_to_dst_offset(material_ke_face.unsqueeze(1), dx=dx, dy=dy, dz=dz)
 
         counts_next = counts - out_counts + in_counts
         momentum_next = momentum - out_force_mom_global - out_material_mom_global + in_mom
@@ -560,7 +678,7 @@ class OptionIIModel(nn.Module):
                             avail = int(available_atoms[b, sp, ix, iy, iz].item())
                             if avail <= 0:
                                 continue
-                            fluxes = atom_flux[b, :, sp, ix, iy, iz].detach().cpu().numpy().tolist()  # length 6
+                            fluxes = atom_flux[b, :, sp, ix, iy, iz].detach().cpu().numpy().tolist()  # length F
                             total_flux = float(sum(fluxes))
                             # Realize an integer number based on total predicted flux.
                             realized_total = min(avail, int(round(total_flux)))
@@ -568,9 +686,9 @@ class OptionIIModel(nn.Module):
                                 continue
                             # Greedy choose highest remaining flux, subtracting 1 each allocation.
                             fluxes_work = fluxes[:]
-                            alloc = [0] * 6
+                            alloc = [0] * F
                             for _ in range(realized_total):
-                                dest = int(max(range(6), key=lambda j: fluxes_work[j]))
+                                dest = int(max(range(F), key=lambda j: fluxes_work[j]))
                                 alloc[dest] += 1
                                 fluxes_work[dest] -= 1.0
                             realized_atoms[b, :, sp, ix, iy, iz] = torch.tensor(
@@ -601,29 +719,33 @@ class OptionIIModel(nn.Module):
         in_mom = torch.zeros_like(momentum)
         in_ke = torch.zeros_like(ke)
 
-        for face in range(6):
+        for dir_idx, (dx, dy, dz) in enumerate(DIRECTIONS_26):
             # Counts
-            atom_face_real = realized_atoms[:, face].to(counts.dtype)  # (B,S,nx,ny,nz)
-            in_counts = in_counts + shift_src_to_dst(atom_face_real, face=face)
+            atom_face_real = realized_atoms[:, dir_idx].to(counts.dtype)  # (B,S,nx,ny,nz)
+            in_counts = in_counts + shift_src_to_dst_offset(atom_face_real, dx=dx, dy=dy, dz=dz)
 
             # Force momentum
-            force_mom_face_rot = force_mom_rot[:, face]  # (B,3,nx,ny,nz)
-            force_mom_face_global = rotate_vec_from_face_normal(force_mom_face_rot, face)
+            force_mom_face_rot = force_mom_rot[:, dir_idx]  # (B,3,nx,ny,nz) local coords
+            force_mom_face_global = torch.einsum(
+                "ij,bjxyz->bixyz", self._global_from_local_26[dir_idx], force_mom_face_rot
+            )
             out_force_mom_global = out_force_mom_global + force_mom_face_global
-            in_mom = in_mom + shift_src_to_dst(force_mom_face_global, face=face)
+            in_mom = in_mom + shift_src_to_dst_offset(force_mom_face_global, dx=dx, dy=dy, dz=dz)
 
             # Material momentum (sum over species)
-            mat_mom_face_rot = material_mom_eff_rot[:, face]  # (B,S,3,nx,ny,nz)
-            mat_mom_face_global = rotate_vec_from_face_normal(mat_mom_face_rot, face)  # (B,S,3,...)
+            mat_mom_face_rot = material_mom_eff_rot[:, dir_idx]  # (B,S,3,nx,ny,nz) local coords
+            mat_mom_face_global = torch.einsum(
+                "ij,bsjxyz->bsixyz", self._global_from_local_26[dir_idx], mat_mom_face_rot
+            )
             mat_mom_total_global = mat_mom_face_global.sum(dim=1)  # (B,3,nx,ny,nz)
             out_material_mom_global = out_material_mom_global + mat_mom_total_global
-            in_mom = in_mom + shift_src_to_dst(mat_mom_total_global, face=face)
+            in_mom = in_mom + shift_src_to_dst_offset(mat_mom_total_global, dx=dx, dy=dy, dz=dz)
 
             # KE
-            force_ke_face = force_ke[:, face]  # (B,nx,ny,nz)
-            in_ke = in_ke + shift_src_to_dst(force_ke_face.unsqueeze(1), face=face)
-            mat_ke_face = material_ke_eff[:, face].sum(dim=1)  # (B,nx,ny,nz)
-            in_ke = in_ke + shift_src_to_dst(mat_ke_face.unsqueeze(1), face=face)
+            force_ke_face = force_ke[:, dir_idx]  # (B,nx,ny,nz)
+            in_ke = in_ke + shift_src_to_dst_offset(force_ke_face.unsqueeze(1), dx=dx, dy=dy, dz=dz)
+            mat_ke_face = material_ke_eff[:, dir_idx].sum(dim=1)  # (B,nx,ny,nz)
+            in_ke = in_ke + shift_src_to_dst_offset(mat_ke_face.unsqueeze(1), dx=dx, dy=dy, dz=dz)
 
         counts_next = counts - atom_out + in_counts
         momentum_next = momentum - out_force_mom_global - out_material_mom_global + in_mom

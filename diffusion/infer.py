@@ -13,6 +13,7 @@ from .config import GridConfig, SpeciesConfig
 from .models.option_i import OptionIModel
 from .models.option_ii import OptionIIModel
 from .models.option_iii import OptionIIIModel
+from .models.option_iv import OptionIVModel
 from .state import CoarseState
 from .data.make_data import make_coarse_state_from_dump
 
@@ -55,6 +56,11 @@ def _instantiate_model(option: str, ckpt: dict, device: torch.device):
             num_species=num_species,
             hidden_channels=model_kwargs["hidden_channels"],
         )
+    elif option == "iv":
+        model = OptionIVModel(
+            num_species=num_species,
+            hidden_channels=model_kwargs["hidden_channels"],
+        )
     else:
         raise ValueError(f"Unknown option: {option}")
     model.to(device)
@@ -68,7 +74,7 @@ def _instantiate_model(option: str, ckpt: dict, device: torch.device):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run multi-step inference/rollout with a trained model.")
-    parser.add_argument("--option", type=str, choices=["i", "ii", "iii"], required=True)
+    parser.add_argument("--option", type=str, choices=["i", "ii", "iii", "iv"], required=True)
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--initial_dump", type=str, required=True, help="Path to a LAMMPS dump file.")
     parser.add_argument("--num_steps", type=int, default=10)

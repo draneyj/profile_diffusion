@@ -16,6 +16,7 @@ from .config import GridConfig
 from .models.option_i import OptionIModel
 from .models.option_ii import OptionIIModel
 from .models.option_iii import OptionIIIModel
+from .models.option_iv import OptionIVModel
 from .state import CoarseState
 
 
@@ -117,8 +118,8 @@ def features_batch_to_state(features: torch.Tensor, *, num_species: int) -> Coar
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train Option I/II/III diffusion models.")
-    parser.add_argument("--option", type=str, choices=["i", "ii", "iii"], required=True)
+    parser = argparse.ArgumentParser(description="Train Option I/II/III/IV diffusion models.")
+    parser.add_argument("--option", type=str, choices=["i", "ii", "iii", "iv"], required=True)
     parser.add_argument("--dataset_path", type=str, default="data/processed/dataset.pt")
     parser.add_argument(
         "--dataset_paths",
@@ -303,8 +304,13 @@ def main() -> None:
             hidden_channels=args.hidden_channels,
             soft_transfer=args.soft_transfer or (not args.hard_eval),
         )
-    else:
+    elif args.option == "iii":
         model = OptionIIIModel(
+            num_species=num_species,
+            hidden_channels=args.hidden_channels,
+        )
+    else:
+        model = OptionIVModel(
             num_species=num_species,
             hidden_channels=args.hidden_channels,
         )

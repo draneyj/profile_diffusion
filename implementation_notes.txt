@@ -15,7 +15,7 @@ The order parameter in each cell should be of the following form where a is the 
 The data has the lattice constant a=3.5657157
 
 Decisions made (implementation-specific)
-1. Framework: PyTorch implementation (both options).
+1. Framework: PyTorch implementation (all model options).
 2. Order parameter: computed per coarse cell using the absolute `x,y,z` coordinates from the LAMMPS dump via
    xi = (1/3)(lambda_x + lambda_y + lambda_z), lambda_x = mean_i cos(8*pi*x_i/a) (and similarly for y and z).
    - Updated: the cosine sums/means are computed using only LAMMPS atom `type=1` by default (`--order_lammps_type`, default `1`).
@@ -78,4 +78,9 @@ Decisions made (implementation-specific)
 
 20. Git ignore scope fix for code/data separation:
     - `.gitignore` anchors the ignored dataset directory to `/data/` (top-level) so `diffusion/data/` (code) remains tracked.
+
+21. Option IV added: direct 3x3x3 predictor (`diffusion/models/option_iv.py`):
+    - Predicts next state in a single pass from current coarse features (no flux decomposition).
+    - Uses periodic padding in x/y and zero padding in z, with output post-processing to enforce
+      non-negative counts/KE, normalized momentum direction, and bounded order.
 

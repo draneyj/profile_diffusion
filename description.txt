@@ -7,7 +7,7 @@ Models take in the current state and predict the next state at each cell. This m
 applied kN times where N is the number of cells in the simulation, allowing a variable simulation size.
 
 
-There are currently two ideas for how the model operates.
+There are currently four ideas for how the model operates.
 
 =================================================================================================================
 
@@ -116,6 +116,31 @@ Why this is a good hybrid:
     * More physically constrained than Option I
     * Easier to optimize than Option II hard greedy integer transfer
     * Keeps flux interpretation while avoiding many discontinuities during training
+
+=================================================================================================================
+
+OPTION IV: Direct local predictor (3x3x3).
+
+For each cell, a 3D CNN with 3x3x3 receptive field predicts the next-step coarse state directly in one pass
+(no iterative diffusion refinement and no explicit flux decomposition).
+
+Inputs per cell:
+    * Number of each atom type
+    * momentum unit direction (3-vector, ||p||=1 or zero)
+    * total KE
+    * order parameter
+
+Outputs per cell:
+    * next counts
+    * next momentum direction
+    * next KE
+    * next order
+
+Post-processing:
+    * counts clamped >= 0 (rounded in eval)
+    * KE clamped >= 0
+    * momentum renormalized to a unit vector (or zero)
+    * order clamped to [-1, 1]
 
 Training (diffusion/train.py):
     * Optional checkpoint naming: --checkpoint_stem MYNAME saves MYNAME_epoch{N}.pt (default stem checkpoint_option<i|ii|iii>).
